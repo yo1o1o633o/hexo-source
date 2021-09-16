@@ -8,14 +8,14 @@ tags:
 ---
 
 {% note success %}
-###特点
+### 特点
 {% endnote %}
 - 利用CAS自旋锁+Synchronized保证并发安全的Map
 - 使用数组+链表+红黑树实现
 - key和value不能为null
 
 {% note success %}
-###注意
+### 注意
 {% endnote %}
 1. 初始化容量计算
     初始容量采用公式 n + n / 2 + 1, 例如创建时指定32, 则根据公式  32 + 32 / 2 + 1 = 49.  然后会取49之后的2的幂数是64
@@ -28,7 +28,7 @@ tags:
 4. 大量的使用CAS自旋操作, 以避免使用锁
 
 {% note success %}
-###关键参数sizeCtl
+### 关键参数sizeCtl
 {% endnote %}
 
 1. sizeCtl为0, 表示数组未初始化, 且初始容量为16
@@ -37,7 +37,7 @@ tags:
 4. sizeCtl小于0且不是-1，表示数组正在扩容,-(1-n)表示n个线程正在对数组扩容
 
 {% note success %}
-###初始化Table
+### 初始化Table
 initTable()
 {% endnote %}
 
@@ -79,7 +79,7 @@ private final Node<K,V>[] initTable() {
 ```
 
 {% note success %}
-###获取元素
+### 获取元素
 tabAt(Node<K,V>[] tab, int i)
 {% endnote %}
 传入数组Table和数组下标, 获取下标对应的元素
@@ -92,7 +92,7 @@ static final <K,V> Node<K,V> tabAt(Node<K,V>[] tab, int i) {
 ```
 
 {% note success %}
-###添加元素
+### 添加元素
 putVal(K key, V value, boolean onlyIfAbsent)
 {% endnote %}
 
@@ -176,7 +176,7 @@ putVal(K key, V value, boolean onlyIfAbsent)
         ```
 
 {% note success %}
-###链表转红黑树
+### 链表转红黑树
 treeifyBin(Node<K,V>[] tab, int index)
 {% endnote %}
 
@@ -211,7 +211,7 @@ private final void treeifyBin(Node<K,V>[] tab, int index) {
 ```
 
 {% note success %}
-###添加计数和检查扩容
+### 添加计数和检查扩容
 addCount(long x, int check)
 {% endnote %}
 
@@ -274,7 +274,7 @@ addCount(long x, int check)
     ```
 
 {% note success %}
-###添加计数
+### 添加计数
 fullAddCount(long x, boolean wasUncontended)
 {% endnote %}
 
@@ -371,7 +371,7 @@ private final void fullAddCount(long x, boolean wasUncontended) {
 ```
 
 {% note success %}
-###扩容方法
+### 扩容方法
 transfer(Node<K,V>[] tab, Node<K,V>[] nextTab)
 {% endnote %}
 
