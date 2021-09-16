@@ -37,48 +37,6 @@ tags:
 4. sizeCtl小于0且不是-1，表示数组正在扩容,-(1-n)表示n个线程正在对数组扩容
 
 {% note success %}
-### 初始化Table
-initTable()
-{% endnote %}
-
-在添加元素时， 如果数组Table为空则进行初始化
-
-- 初始化过程中， 会判断sizeCtl, 如果小于0则表示已经有线程在初始化, 当前线程让出CPU
-- sizeCtl在初始化前保存的时候初始化容量, 初始化完成后保存扩容阈值
-- sc = n - (n >>> 2);计算扩容阈值, n>>>2就是n除以4, n - n / 4就是n乘以4分之一n. 即sc = 0.75*n. 用右移计算避免除法的性能损耗
-
-```java
-private final Node<K,V>[] initTable() {
-    Node<K,V>[] tab; int sc;
-    while ((tab = table) == null || tab.length == 0) {
-        // 小于0表示其他线程正在初始化Table, 当前线程调用yield方法让出CPU时间片
-        if ((sc = sizeCtl) < 0)
-            Thread.yield(); // lost initialization race; just spin
-        // 以原子性操作对sizeCtl赋值成-1, 表示正在扩容
-        else if (U.compareAndSwapInt(this, SIZECTL, sc, -1)) {
-            try {
-                if ((tab = table) == null || tab.length == 0) {
-                    // 初始化容量
-                    int n = (sc > 0) ? sc : DEFAULT_CAPACITY;
-                    @SuppressWarnings("unchecked")
-                    // 创建数组
-                    Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n];
-                    table = tab = nt;
-                    // 计算扩容阈值
-                    sc = n - (n >>> 2);
-                }
-            } finally {
-                // 初始化完成, sizeCtl保存扩容阈值
-                sizeCtl = sc;
-            }
-            break;
-        }
-    }
-    return tab;
-}
-```
-
-{% note success %}
 ### 获取元素
 tabAt(Node<K,V>[] tab, int i)
 {% endnote %}
@@ -90,90 +48,6 @@ static final <K,V> Node<K,V> tabAt(Node<K,V>[] tab, int i) {
     return (Node<K,V>)U.getObjectVolatile(tab, ((long)i << ASHIFT) + ABASE);
 }
 ```
-
-{% note success %}
-### 添加元素
-putVal(K key, V value, boolean onlyIfAbsent)
-{% endnote %}
-
-- 添加元素方法内部实现了一个死循环, 一个自旋操作, 循环内部会有3种逻辑, 添加元素成功后会退出循环
-- 首先判断Table是否为空, 如果为空则执行初始化方法initTable
-    ```java
-    if (tab == null || (n = tab.length) == 0)
-        tab = initTable();
-    ```
-- 如果已经初始化, 则添加操作会有3种情况发生
-    1. 要添加的key对应的Table数组索引位置为空, 即元素不存在
-        以CAS形式添加元素, 这里可能会出现多线程并发添加的情况, 如果CAS赋值失败, 则表示其他线程先一步添加元素了, 则当前线程进入下一次循环, 再次判断元素是否存在, 如果存在则会进入到元素已存在的处理逻辑内, 即第3种情况
-        ```java
-        // 计算要添加的key对于数组的索引下标
-        else if ((f = tabAt(tab, i = (n - 1) & hash)) == null) {
-           // 以原子性操作对这个索引赋值, 将要添加的结点放到索引位置上
-            if (casTabAt(tab, i, null, new Node<K,V>(hash, key, value, null)))
-                // CAS形式添加到数组成功, 直接返回
-                break;
-        }
-        ```
-    2. Table数组正在扩容, 则触发协助扩容逻辑, 扩容的标志是元素结点的hash值为-1
-        ```java
-        tab = helpTransfer(tab, f);
-        ```
-    3. 根据hash值获取到的元素不为空, 则证明出现hash冲突, 进行链表或者红黑树处理, 分为以下3步
-        - 对当前数组元素进行加锁synchronized, 确保只有一个线程能操作这个元素对应的桶（链表或红黑树）
-        - 通过hash值来判断这个元素结点是链表或者红黑树, 如果hash值为正数, 则当前元素是链表头结点, 否则是红黑树的父结点
-        - 开始循环遍历, 如果发现key值相同, 则表示要添加的元素key已经存在, 直接覆盖value, 否则将元素结点添加到链表尾部或者红黑树里
-
-        ```java
-        // 加锁, f是数组Table的元素, 对其加锁保证多个线程只能一个线程操作当前元素对应的桶
-        synchronized (f) {
-            if (tabAt(tab, i) == f) {
-                // 链表的hash值是正数或0
-                if (fh >= 0) {
-                    // 循环遍历自增数值
-                    binCount = 1;
-                    // 循环遍历链表各个结点
-                    for (Node<K,V> e = f;; ++binCount) {
-                        K ek;
-                        // 当key相同时, 表示key已经存在了, 进行值覆盖操作
-                        if (e.hash == hash && ((ek = e.key) == key || (ek != null && key.equals(ek)))) {
-                            oldVal = e.val;
-                            // 判断下入参是否元素不存在时才放入, 即是否覆盖原key的值
-                            if (!onlyIfAbsent)
-                                e.val = value;
-                            break;
-                        }
-                        Node<K,V> pred = e;
-                        // 把新的元素结点添加到链表尾部
-                        if ((e = e.next) == null) {
-                            pred.next = new Node<K,V>(hash, key, value, null);
-                            break;
-                        }
-                    }
-                }
-                // 元素结点是红黑树
-                else if (f instanceof TreeBin) {
-                    Node<K,V> p;
-                    binCount = 2;
-                    if ((p = ((TreeBin<K,V>)f).putTreeVal(hash, key, value)) != null) {
-                        oldVal = p.val;
-                        if (!onlyIfAbsent)
-                            p.val = value;
-                    }
-                }
-            }
-        }
-        ```
-    4. 当添加元素执行完成后, 判断当前链表长度是否大于8, 如果是8则调用转换红黑树方法
-        ```java
-        if (binCount != 0) {
-            // 链表长度大于等于8则进入转换方法
-            if (binCount >= TREEIFY_THRESHOLD)
-                treeifyBin(tab, i);
-            if (oldVal != null)
-                return oldVal;
-            break;
-        }
-        ```
 
 {% note success %}
 ### 链表转红黑树
@@ -210,68 +84,7 @@ private final void treeifyBin(Node<K,V>[] tab, int index) {
 }
 ```
 
-{% note success %}
-### 添加计数和检查扩容
-addCount(long x, int check)
-{% endnote %}
 
-- 添加元素完成后, 添加元素数量计数操作
-
-    ```java
-    addCount(1L, binCount);
-    ```
-
-- 添加计数
-    为了在并发情况下, 多个线程同时进行添加元素操作, 对总元素个数不能使用普通累加操作, 则采用数值+数组的形式进行处理
-    baseCount：用来进行累加操作
-    CounterCell[]：数组用来当baseCount累加操作失败时保存数据
-    流程：首先CAS对baseCount进行累加操作, 如果操作成功则继续向下, 否则使用CounterCell数组中的一个元素来保存累加数值, 当需要获取总数时, 使用BaseCount和数组的每个元素的总计
-    计数操作完成后判断是否需要扩容, 并进行扩容处理
-
-    ```java
-    // 添加计数
-    private final void addCount(long x, int check) {
-        // CounterCell数组就是保存元素个数的数组
-        CounterCell[] as; long b, s;
-        // 如果CounterCell数组不为空, 或者CAS对BaseCount设置值失败, 第一次调用时数组是空的, 主要判断第二个条件baseCount是否设置成功
-        if ((as = counterCells) != null || !U.compareAndSwapLong(this, BASECOUNT, b = baseCount, s = b + x)) {
-            CounterCell a; long v; int m;
-            boolean uncontended = true;
-            // ThreadLocalRandom.getProbe() 得到线程的探针哈希值, 如果发生hash冲突则会生成一个新的不同hash, 和Map的hash不同的是, 此处会随机生成hash
-            // 数组为空, 或者数组没有元素, 或者当前线程的探针哈希值对应元素不存在
-            if (as == null || (m = as.length - 1) < 0 || (a = as[ThreadLocalRandom.getProbe() & m]) == null || !(uncontended = U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))) {
-                // 关键方法, 进行元素个数添加操作
-                fullAddCount(x, uncontended);
-                return;
-            }
-            // 如果是不需要检查扩容的调用, 则此处可以直接返回了
-            if (check <= 1)
-                return;
-            // 统计数组元素个数
-            s = sumCount();
-        }
-        // 当发生添加操作时进入此逻辑判断是否要对数组扩容
-        if (check >= 0) {
-            Node<K,V>[] tab, nt; int n, sc;
-            // 此时sizeCtl保存的是扩容阈值, s为当前数组元素个数, 此处判断是否需要扩容
-            while (s >= (long)(sc = sizeCtl) && (tab = table) != null && (n = tab.length) < MAXIMUM_CAPACITY) {
-                int rs = resizeStamp(n);
-                // 小于0则表示当前有线程在扩容, 进行协助扩容操作
-                if (sc < 0) {
-                    if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 || sc == rs + MAX_RESIZERS || (nt = nextTable) == null || transferIndex <= 0)
-                        break;
-                    if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1))
-                        transfer(tab, nt);
-                }
-                // 大于等于0表示开始扩容, 同时将sizeCtl的值设置成负数
-                else if (U.compareAndSwapInt(this, SIZECTL, sc, (rs << RESIZE_STAMP_SHIFT) + 2))
-                    // 扩容方法
-                    transfer(tab, null);
-                s = sumCount();
-            }
-        }
-    }
-    ```
 
 {% note success %}
 ### 添加计数
@@ -651,5 +464,384 @@ public V get(Object key) {
         }
     }
     return null;
+}
+```
+
+{% note success %}
+### KEY是否存在
+{% endnote %}
+调用获取元素方法进行判断
+```java
+public boolean containsKey(Object key) {
+    return get(key) != null;
+}
+```
+
+{% note success %}
+### VALUE是否存在
+{% endnote %}
+找到一个VALUE, 最坏可能遍历整个Map, 性能很慢
+通过Traverser对象构建的迭代器进行查找
+```java
+public boolean containsValue(Object value) {
+    // value不能为null
+    if (value == null)
+        throw new NullPointerException();
+    Node<K,V>[] t;
+    if ((t = table) != null) {
+        Traverser<K,V> it = new Traverser<K,V>(t, t.length, 0, t.length);
+        for (Node<K,V> p; (p = it.advance()) != null; ) {
+            V v;
+            if ((v = p.val) == value || (v != null && value.equals(v)))
+                return true;
+        }
+    }
+    return false;
+}
+```
+
+{% note success %}
+### 添加元素put()
+{% endnote %}
+内部调用putVal方法, key和value不能为null, 第三个参数表示发现key已存在是否覆盖, 传入false表示覆盖原value
+```java
+public V put(K key, V value) {
+    return putVal(key, value, false);
+}
+```
+
+{% note success %}
+### 添加元素putVal()
+{% endnote %}
+添加元素操作会有多线程并发处理情况, 采用CAS赋值和synchronized加锁的形式保证线程安全
+1. 如果table为null, 则表示还未初始化, 调用初始化方法
+2. 如果table已经初始化, 同时hash对应的数组元素为null, 则直接进行CAS赋值操作, 成功则跳出循环, 失败则重新进入循环
+3. 如果当前元素hash为-1, 则表示当前元素正在进行扩容移动, 调用协助扩容方法
+4. 以上都不成立, 表明当前数组元素有值, 对这个元素加synchronized后进行遍历处理
+    - 链表: 如果key在链表中存在, 则进行覆盖, 否则添加到链表尾部
+    - 红黑树: 使用红黑树对象方法进行处理
+
+```java
+final V putVal(K key, V value, boolean onlyIfAbsent) {
+    // 校验下key和value不能为null
+    if (key == null || value == null) throw new NullPointerException();
+    // 获取key的Hash值
+    int hash = spread(key.hashCode());
+    // 初始化操作数
+    int binCount = 0;
+    // 自旋操作, 如果不满足break或者return逻辑, 则会自旋
+    for (Node<K,V>[] tab = table;;) {
+        Node<K,V> f; int n, i, fh;
+        // 判断当前数组未初始化, 进行初始化
+        if (tab == null || (n = tab.length) == 0)
+            tab = initTable();
+        // 判断根据Hash值获取到的元素为null, 则以CAS形式将Key保存在这个索引位置上, CAS如果赋值失败了则表明有其他线程赋值成功了, 则进行下一次循环, 下一次循环时此if条件不成立进入其他逻辑处理
+        else if ((f = tabAt(tab, i = (n - 1) & hash)) == null) {
+            if (casTabAt(tab, i, null, new Node<K,V>(hash, key, value, null)))
+                // CAS形式添加到数组成功, 直接返回
+                break;                  
+        }
+        // 当前Hash值为MOVED, 表示数组正在进行扩容, 进行协助扩容操作, 操作完成后再进行下一次循环
+        else if ((fh = f.hash) == MOVED)
+            tab = helpTransfer(tab, f);
+        // 当前元素索引位置有值, 则进行链表或者红黑树的处理
+        else {
+            V oldVal = null;
+            // 对当前数组元素加锁
+            synchronized (f) {
+                // 加锁后再次判断获取到元素是否发生了变化, 因为在上面逻辑获取到元素和加锁之间有可能出现其他线程对这个元素进行了修改
+                if (tabAt(tab, i) == f) {
+                    // Hash大于等于0, 表示当前元素是一个链表结点
+                    if (fh >= 0) {
+                        binCount = 1;
+                        // 遍历链表, 同时记录操作数
+                        for (Node<K,V> e = f;; ++binCount) {
+                            K ek;
+                            // 遍历中判断key是否相等, 相等则表示Key已存在
+                            if (e.hash == hash && ((ek = e.key) == key || (ek != null && key.equals(ek)))) {
+                                oldVal = e.val;
+                                // 根据入参onlyIfAbsent, 是否对已存在的key覆盖value
+                                if (!onlyIfAbsent)
+                                    e.val = value;
+                                break;
+                            }
+                            Node<K,V> pred = e;
+                            // 表示链表中不存在该key, 则将新的key添加到链表尾部
+                            if ((e = e.next) == null) {
+                                pred.next = new Node<K,V>(hash, key, value, null);
+                                break;
+                            }
+                        }
+                    }
+                    // 元素结点是红黑树结点
+                    else if (f instanceof TreeBin) {
+                        Node<K,V> p;
+                        binCount = 2;
+                        // 则使用putTreeVal方法将key添加到树种
+                        if ((p = ((TreeBin<K,V>)f).putTreeVal(hash, key, value)) != null) {
+                            oldVal = p.val;
+                            if (!onlyIfAbsent)
+                                p.val = value;
+                        }
+                    }
+                }
+            }
+            // 当使用链表保存数据时, 每次遍历都会自增binCount, 即记录链表中的元素个数, 如果有值同时这个值大于等于转换红黑树的条件时, 调用treeifyBin进行转换
+            if (binCount != 0) {
+                // binCount >= 8
+                if (binCount >= TREEIFY_THRESHOLD)
+                    treeifyBin(tab, i);
+                if (oldVal != null)
+                    return oldVal;
+                break;
+            }
+        }
+    }
+    // 添加元素操作完成后, 进行元素个数记录操作
+    addCount(1L, binCount);
+    return null;
+}
+```
+
+{% note success %}
+### 批量添加元素
+{% endnote %}
+传入一个Map, 将Map中元素全部添加到当前Map中, 先根据要添加Map的元素个数进行尝试扩容, 然后调用putVal()方法循环添加元素
+```java
+public void putAll(Map<? extends K, ? extends V> m) {
+    // 尝试调整Map容量, 以容纳要添加的Map
+    tryPresize(m.size());
+    // 循环添加元素
+    for (Map.Entry<? extends K, ? extends V> e : m.entrySet())
+        putVal(e.getKey(), e.getValue(), false);
+}
+```
+
+{% note success %}
+### 移除元素
+{% endnote %}
+内部调用替换结点方法, value替换成null
+```java
+public V remove(Object key) {
+    return replaceNode(key, null, null);
+}
+```
+
+{% note success %}
+### 替换元素结点
+{% endnote %}
+和putVal()基本一致, 只是没有了初始化table操作, 同时需要根据入参来选择替换还是移除元素操作, 处理完成后重新统计元素数量
+```java
+final V replaceNode(Object key, V value, Object cv) {
+    int hash = spread(key.hashCode());
+    for (Node<K,V>[] tab = table;;) {
+        Node<K,V> f; int n, i, fh;
+        // 如果数组未初始化, 或者数组没有元素, 或者未找到key对应的元素则不处理, 直接跳出循环
+        if (tab == null || (n = tab.length) == 0 || (f = tabAt(tab, i = (n - 1) & hash)) == null)
+            break;
+        // 如果当前数组元素正在扩容迁移, 则协助扩容
+        else if ((fh = f.hash) == MOVED)
+            tab = helpTransfer(tab, f);
+        else {
+            V oldVal = null;
+            boolean validated = false;
+            // 对元素加锁, 保证只有一个线程操作
+            synchronized (f) {
+                // 再次判断当前元素是否发生变化, 因为在上面逻辑获取到元素和加锁之间有可能出现其他线程对这个元素进行了修改
+                if (tabAt(tab, i) == f) {
+                    // 当前元素是链表结点
+                    if (fh >= 0) {
+                        validated = true;
+                        for (Node<K,V> e = f, pred = null;;) {
+                            K ek;
+                            if (e.hash == hash && ((ek = e.key) == key || (ek != null && key.equals(ek)))) {
+                                V ev = e.val;
+                                if (cv == null || cv == ev || (ev != null && cv.equals(ev))) {
+                                    oldVal = ev;
+                                    if (value != null)
+                                        e.val = value;
+                                    else if (pred != null)
+                                        pred.next = e.next;
+                                    else
+                                        setTabAt(tab, i, e.next);
+                                }
+                                break;
+                            }
+                            pred = e;
+                            if ((e = e.next) == null)
+                                break;
+                        }
+                    }
+                    // 元素结点是红黑树结点
+                    else if (f instanceof TreeBin) {
+                        validated = true;
+                        TreeBin<K,V> t = (TreeBin<K,V>)f;
+                        TreeNode<K,V> r, p;
+                        if ((r = t.root) != null && (p = r.findTreeNode(hash, key, null)) != null) {
+                            V pv = p.val;
+                            if (cv == null || cv == pv || (pv != null && cv.equals(pv))) {
+                                oldVal = pv;
+                                if (value != null)
+                                    p.val = value;
+                                else if (t.removeTreeNode(p))
+                                    setTabAt(tab, i, untreeify(t.first));
+                            }
+                        }
+                    }
+                }
+            }
+            if (validated) {
+                if (oldVal != null) {
+                    if (value == null)
+                        addCount(-1L, -1);
+                    return oldVal;
+                }
+                break;
+            }
+        }
+    }
+    return null;
+}
+```
+
+{% note success %}
+### 清空MAP
+{% endnote %}
+遍历数组, 对每个元素进行清空操作, 如果元素为null则跳过, 如果当前元素正在进行扩容, 则协助扩容后重置数组遍历索引, 重新遍历数组进行清空操作
+```java
+public void clear() {
+    // 记录操作数
+    long delta = 0L; // negative number of deletions
+    int i = 0;
+    Node<K,V>[] tab = table;
+    while (tab != null && i < tab.length) {
+        int fh;
+        Node<K,V> f = tabAt(tab, i);
+        // 元素为null直接跳过
+        if (f == null)
+            ++i;
+        // 当前元素正在扩容迁移, 进行协助扩容操作, 操作完成后重置索引为0, 重新遍历数组进行处理
+        else if ((fh = f.hash) == MOVED) {
+            tab = helpTransfer(tab, f);
+            i = 0; // restart
+        }
+        // 元素不为null, 则处理链表或者红黑树
+        else {
+            synchronized (f) {
+                // 再次判断当前元素是否发生变化, 因为在上面逻辑获取到元素和加锁之间有可能出现其他线程对这个元素进行了修改
+                if (tabAt(tab, i) == f) {
+                    // 如果是链表则取链表头结点, 如果是红黑树则取first结点
+                    Node<K,V> p = (fh >= 0 ? f : (f instanceof TreeBin) ? ((TreeBin<K,V>)f).first : null);
+                    while (p != null) {
+                        --delta;
+                        p = p.next;
+                    }
+                    setTabAt(tab, i++, null);
+                }
+            }
+        }
+    }
+    // 根据操作数进行元素数量处理
+    if (delta != 0L)
+        addCount(delta, -1);
+}
+```
+
+{% note success %}
+### 初始化Table
+initTable()
+{% endnote %}
+数组未初始化, 则进行初始化操作, 初始化依赖sizeCtl参数
+sizeCtl如果小于0则表示已经有线程在初始化, 当前线程让出CPU, 否则采用CAS方式争夺初始化操作权, 多线程并发情况, 同时进行CAS竞争, 竞争成功的进行初始化操作, 竞争失败的让除CPU时间片等待初始化完成
+竞争成功的线程将sizeCtl设置成-1, 表明数组正在进行初始化
+初始化完成后将sizeCtl设置为扩容阈值
+扩容阈值计算sc = n - (n >>> 2)
+例如: n = 16, 则 16 - 16 / 2 / 2 = 12, 即16 * 0.75 = 12, 扩容阈值为12, 当元素数量达到12个时会触发扩容操作. 右移操作替代除法, 提高运算效率
+
+```java
+private final Node<K,V>[] initTable() {
+    Node<K,V>[] tab; int sc;
+    while ((tab = table) == null || tab.length == 0) {
+        // 小于0表示其他线程正在初始化Table, 当前线程调用yield方法让出CPU时间片
+        if ((sc = sizeCtl) < 0)
+            Thread.yield(); // lost initialization race; just spin
+        // 以原子性操作对sizeCtl赋值成-1, 表示正在扩容
+        else if (U.compareAndSwapInt(this, SIZECTL, sc, -1)) {
+            try {
+                if ((tab = table) == null || tab.length == 0) {
+                    // 初始化容量
+                    int n = (sc > 0) ? sc : DEFAULT_CAPACITY;
+                    @SuppressWarnings("unchecked")
+                    // 创建数组
+                    Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n];
+                    table = tab = nt;
+                    // 计算扩容阈值
+                    sc = n - (n >>> 2);
+                }
+            } finally {
+                // 初始化完成, sizeCtl保存扩容阈值
+                sizeCtl = sc;
+            }
+            break;
+        }
+    }
+    return tab;
+}
+```
+
+{% note success %}
+### 添加计数和检查扩容
+addCount(long x, int check)
+{% endnote %}
+
+- 添加计数
+    为了在并发情况下, 多个线程同时进行添加元素操作, 对总元素个数不能使用普通累加操作, 则采用数值+数组的形式进行处理
+    baseCount：用来进行累加操作
+    CounterCell[]：数组用来当baseCount累加操作失败时保存数据
+    流程：首先CAS对baseCount进行累加操作, 如果操作成功则继续向下, 否则使用CounterCell数组中的一个元素来保存累加数值, 当需要获取总数时, 使用BaseCount和数组的每个元素的总计
+    计数操作完成后判断是否需要扩容, 并进行扩容处理
+
+```java
+// 添加计数
+private final void addCount(long x, int check) {
+    // CounterCell数组就是保存元素个数的数组
+    CounterCell[] as; long b, s;
+    // 如果CounterCell数组不为空, 或者CAS对BaseCount设置值失败, 第一次调用时数组是空的, 主要判断第二个条件baseCount是否设置成功
+    if ((as = counterCells) != null || !U.compareAndSwapLong(this, BASECOUNT, b = baseCount, s = b + x)) {
+        CounterCell a; long v; int m;
+        boolean uncontended = true;
+        // ThreadLocalRandom.getProbe() 得到线程的探针哈希值, 如果发生hash冲突则会生成一个新的不同hash, 和Map的hash不同的是, 此处会随机生成hash
+        // 数组为空, 或者数组没有元素, 或者当前线程的探针哈希值对应元素不存在
+        if (as == null || (m = as.length - 1) < 0 || (a = as[ThreadLocalRandom.getProbe() & m]) == null || !(uncontended = U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))) {
+            // 关键方法, 进行元素个数添加操作
+            fullAddCount(x, uncontended);
+            return;
+        }
+        // 如果是不需要检查扩容的调用, 则此处可以直接返回了
+        if (check <= 1)
+            return;
+        // 统计数组元素个数
+        s = sumCount();
+    }
+    // 当发生添加操作时进入此逻辑判断是否要对数组扩容
+    if (check >= 0) {
+        Node<K,V>[] tab, nt; int n, sc;
+        // 此时sizeCtl保存的是扩容阈值, s为当前数组元素个数, 此处判断是否需要扩容
+        while (s >= (long)(sc = sizeCtl) && (tab = table) != null && (n = tab.length) < MAXIMUM_CAPACITY) {
+            int rs = resizeStamp(n);
+            // 小于0则表示当前有线程在扩容, 进行协助扩容操作
+            if (sc < 0) {
+                if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 || sc == rs + MAX_RESIZERS || (nt = nextTable) == null || transferIndex <= 0)
+                    break;
+                if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1))
+                    transfer(tab, nt);
+            }
+            // 大于等于0表示开始扩容, 同时将sizeCtl的值设置成负数
+            else if (U.compareAndSwapInt(this, SIZECTL, sc, (rs << RESIZE_STAMP_SHIFT) + 2))
+                // 扩容方法
+                transfer(tab, null);
+            s = sumCount();
+        }
+    }
 }
 ```
