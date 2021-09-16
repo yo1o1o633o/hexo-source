@@ -522,3 +522,134 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
     }
 }
 ```
+
+{% note success %}
+### 获取Key的Hash值
+{% endnote %}
+```java
+static final int HASH_BITS = 0x7fffffff;
+static final int spread(int h) {
+    return (h ^ (h >>> 16)) & HASH_BITS;
+}
+```
+
+{% note success %}
+### 计算初始容量
+{% endnote %}
+初始容量一定是2的幂次, 根据构造函数可知调用此方法传入的一定不是个2的幂次, 因为有+1操作
+```java
+private static final int tableSizeFor(int c) {
+    int n = c - 1;
+    n |= n >>> 1;
+    n |= n >>> 2;
+    n |= n >>> 4;
+    n |= n >>> 8;
+    n |= n >>> 16;
+    return (n < 0) ? 1 : (n >= MAXIMUM_CAPACITY) ? MAXIMUM_CAPACITY : n + 1;
+}
+```
+
+{% note success %}
+### 构造方法
+{% endnote %}
+空参的构造方法, 什么都不做, 会在对Map操作时使用默认容量(16)初始化
+```java
+public ConcurrentHashMap() {
+}
+```
+传入初始容量构造方法, 根据传入的初始容量计算实际的初始容量, 并向sizeCtl参数赋值, 因为数组还未初始化, sizeCtl表示初始容量
+initialCapacity + (initialCapacity >>> 1) + 1 = 16 + 16 / 2 + 1 = 25
+调用tableSizeFor方法获取最近的2的幂次
+```java
+public ConcurrentHashMap(int initialCapacity) {
+    if (initialCapacity < 0)
+        throw new IllegalArgumentException();
+    int cap = ((initialCapacity >= (MAXIMUM_CAPACITY >>> 1)) ?
+               MAXIMUM_CAPACITY :
+               tableSizeFor(initialCapacity + (initialCapacity >>> 1) + 1));
+    this.sizeCtl = cap;
+}
+```
+传入一个Map的构造方法, 初始化容量为默认容量, 底层调用的是putAll方法
+```java
+public ConcurrentHashMap(Map<? extends K, ? extends V> m) {
+    this.sizeCtl = DEFAULT_CAPACITY;
+    putAll(m);
+}
+```
+使用传入的初始容量, 扩容阈值, 调用下边的构造方法
+```java
+public ConcurrentHashMap(int initialCapacity, float loadFactor) {
+    this(initialCapacity, loadFactor, 1);
+}
+```
+使用传入的初始容量, 扩容阈值计算初始化容量
+```java
+public ConcurrentHashMap(int initialCapacity, float loadFactor, int concurrencyLevel) {
+    // 入参判断
+    if (!(loadFactor > 0.0f) || initialCapacity < 0 || concurrencyLevel <= 0)
+        throw new IllegalArgumentException();
+    // 估计的并发更新线程数, 根据这个值调整初始容量大小
+    if (initialCapacity < concurrencyLevel)   // Use at least as many bins
+        initialCapacity = concurrencyLevel;   // as estimated threads
+    // 如: initialCapacity = 16, loadFactor = 0.75
+    // (long)(1.0 + (long)initialCapacity / loadFactor) = 1.0 + 16 / 0.75 = 22.33
+    long size = (long)(1.0 + (long)initialCapacity / loadFactor);
+    // tableSizeFor((int)size) = tableSizeFor(22.33) = 32
+    int cap = (size >= (long)MAXIMUM_CAPACITY) ? MAXIMUM_CAPACITY : tableSizeFor((int)size);
+    // 向sizeCtl参数赋值, 因为数组还未初始化, sizeCtl表示初始容量
+    this.sizeCtl = cap;
+}
+```
+
+{% note success %}
+### 获取Map元素数量
+{% endnote %}
+通过sumCount()方法计算Map元素总数, 总数是可能出现负数或者大于Integer.MAX_VALUE的情况, 如果发送就返回0或者Integer.MAX_VALUE
+```java
+public int size() {
+    long n = sumCount();
+    return ((n < 0L) ? 0 : (n > (long)Integer.MAX_VALUE) ? Integer.MAX_VALUE : (int)n);
+}
+```
+
+{% note success %}
+### 判断Map是否为空
+{% endnote %}
+通过sumCount()方法计算Map元素总数来判断
+```java
+public boolean isEmpty() {
+    return sumCount() <= 0L; // ignore transient negative values
+}
+```
+
+{% note success %}
+### 获取元素
+{% endnote %}
+```java
+public V get(Object key) {
+    Node<K,V>[] tab; Node<K,V> e, p; int n, eh; K ek;
+    // 计算Key的Hash
+    int h = spread(key.hashCode());
+    // 数组不为null
+    // 数组长度不为0
+    // 根据Hash值计算的索引位置元素不为null
+    if ((tab = table) != null && (n = tab.length) > 0 && (e = tabAt(tab, (n - 1) & h)) != null) {
+        // 如果获取的元素Hash和Key的Hash相同
+        if ((eh = e.hash) == h) {
+            // 如果Key相等, 则直接返回Value
+            if ((ek = e.key) == key || (ek != null && key.equals(ek)))
+                return e.val;
+        }
+        // 如果Hash为负数, 则数组可能在扩容或者元素是一个红黑树结点
+        else if (eh < 0)
+            return (p = e.find(h, key)) != null ? p.val : null;
+        // 上述都不满足, 则当前元素结点是链表, 在链表中遍历查找对应的Key
+        while ((e = e.next) != null) {
+            if (e.hash == h && ((ek = e.key) == key || (ek != null && key.equals(ek))))
+                return e.val;
+        }
+    }
+    return null;
+}
+```
