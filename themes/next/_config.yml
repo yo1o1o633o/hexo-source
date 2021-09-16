@@ -127,9 +127,9 @@ sidebar:
 # Sidebar Avatar
 avatar:
   # Replace the default image and set the url here.
-  url: #/images/avatar.gif
+  url: /images/avatar.png
   # If true, the avatar will be dispalyed in circle.
-  rounded: false
+  rounded: true
   # If true, the avatar will be rotated with the cursor.
   rotated: false
 
@@ -356,8 +356,8 @@ codeblock:
   # Code Highlight theme
   # All available themes: https://theme-next.js.org/highlight/
   theme:
-    light: default
-    dark: tomorrow-night
+    light: xcode
+    dark: xcode
   prism:
     light: prism
     dark: prism-dark
@@ -427,8 +427,8 @@ font:
   # Global font settings used for all elements inside <body>.
   global:
     external: true
-    family: Lato
-    size: 0.75
+    family: Roboto
+    size: 0.8
 
   # Font settings for site title (.site-title).
   title:
