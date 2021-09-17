@@ -448,9 +448,8 @@ public V get(Object key) {
     // 数组长度不为0
     // 根据Hash值计算的索引位置元素不为null
     if ((tab = table) != null && (n = tab.length) > 0 && (e = tabAt(tab, (n - 1) & h)) != null) {
-        // 如果获取的元素Hash和Key的Hash相同
+        // 当前数组元素就是要获取的key, 直接返回
         if ((eh = e.hash) == h) {
-            // 如果Key相等, 则直接返回Value
             if ((ek = e.key) == key || (ek != null && key.equals(ek)))
                 return e.val;
         }
@@ -841,6 +840,255 @@ private final void addCount(long x, int check) {
                 // 扩容方法
                 transfer(tab, null);
             s = sumCount();
+        }
+    }
+}
+```
+
+{% note success %}
+### 协助扩容
+{% endnote %}
+```java
+final Node<K,V>[] helpTransfer(Node<K,V>[] tab, Node<K,V> f) {
+    Node<K,V>[] nextTab; int sc;
+    if (tab != null && (f instanceof ForwardingNode) &&
+        (nextTab = ((ForwardingNode<K,V>)f).nextTable) != null) {
+        int rs = resizeStamp(tab.length);
+        while (nextTab == nextTable && table == tab && (sc = sizeCtl) < 0) {
+            if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 || sc == rs + MAX_RESIZERS || transferIndex <= 0)
+                break;
+            if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1)) {
+                transfer(tab, nextTab);
+                break;
+            }
+        }
+        return nextTab;
+    }
+    return table;
+}
+```
+
+{% note success %}
+### 尝试扩容用以保存给定数量的元素
+{% endnote %}
+size不需要完全准确
+```java
+private final void tryPresize(int size) {
+    // 根据给定size计算需要的数组容量, 如果size超出最大容量的一半, 则取最大容量值, 否则扩容至0.75倍后的2的幂次
+    int c = (size >= (MAXIMUM_CAPACITY >>> 1)) ? MAXIMUM_CAPACITY : tableSizeFor(size + (size >>> 1) + 1);
+    int sc;
+    while ((sc = sizeCtl) >= 0) {
+        Node<K,V>[] tab = table; int n;
+        // 数组未初始化, 进行初始化然后进行下一次循环
+        if (tab == null || (n = tab.length) == 0) {
+            // 取sizeCtl和刚刚计算出的容量中较大的值作为扩容容量
+            n = (sc > c) ? sc : c;
+            // 尝试将sizeCtl设置成-1, 即竞争初始化数组权限
+            if (U.compareAndSwapInt(this, SIZECTL, sc, -1)) {
+                try {
+                    // 再次判断数组table未发生变化
+                    if (table == tab) {
+                        @SuppressWarnings("unchecked")
+                        // 初始化数组
+                        Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n];
+                        table = nt;
+                        // 计算出新的扩容阈值
+                        sc = n - (n >>> 2);
+                    }
+                } finally {
+                    // 赋值新的扩容阈值
+                    sizeCtl = sc;
+                }
+            }
+        }
+        // 已经不能再调整容量了
+        else if (c <= sc || n >= MAXIMUM_CAPACITY)
+            break;
+        // 已经初始化了数组
+        else if (tab == table) {
+            // 返回用于调整大小为n的标记位
+            int rs = resizeStamp(n);
+            if (sc < 0) {
+                Node<K,V>[] nt;
+                if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 || sc == rs + MAX_RESIZERS || (nt = nextTable) == null || transferIndex <= 0)
+                    break;
+                if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1))
+                    transfer(tab, nt);
+            }
+            else if (U.compareAndSwapInt(this, SIZECTL, sc, (rs << RESIZE_STAMP_SHIFT) + 2))
+                transfer(tab, null);
+        }
+    }
+}
+```
+
+{% note success %}
+### 扩容操作
+{% endnote %}
+
+迁移操作, 新的数组是原数组容量的二倍, 则进行与运算时, 高位变化只会有1位发生变化, 同时只有两种可能0, 1
+在迁移元素时, 根据与运算将链表下元素拆分成两个链表
+将都为0的链表保存在和原数组对应的索引位置上, 将都为1的链表保存在原数组对应索引位+数组长度的索引位置上
+
+示例:
+使用高位与操作
+1111 1111 1111 1111 1111 1111 0<font color=#FF0000>0</font>01 1010
+0000 0000 0000 0000 0000 0000 0<font color=#FF0000>1</font>00 0000
+结果为0
+
+1111 1111 1111 1111 1111 1111 0<font color=#FF0000>1</font>01 1010
+0000 0000 0000 0000 0000 0000 0<font color=#FF0000>1</font>00 0000
+结果为1
+
+```java
+private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
+    int n = tab.length, stride;
+    // 如果CPU核数大于1, 则当前 stride = 数组大小/8/CPU核数, 如果是单核服务器则stride为数组大小
+    // 计算结果如果小于16, 则赋值16, 即最小每个线程处理16个元素
+    // 此计算保证每个线程处理的段大小相同, 避免迁移任务出现不均匀
+    if ((stride = (NCPU > 1) ? (n >>> 3) / NCPU : n) < MIN_TRANSFER_STRIDE)
+        stride = MIN_TRANSFER_STRIDE;
+    // 要迁移的数组为null, 则创建2倍大的新数组
+    if (nextTab == null) {
+        try {
+            @SuppressWarnings("unchecked")
+            Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n << 1];
+            nextTab = nt;
+        } catch (Throwable ex) {      // try to cope with OOME
+            sizeCtl = Integer.MAX_VALUE;
+            return;
+        }
+        nextTable = nextTab;
+        transferIndex = n;
+    }
+    int nextn = nextTab.length;
+    // 创建占位结点, 该结点指向新数组Table
+    ForwardingNode<K,V> fwd = new ForwardingNode<K,V>(nextTab);
+    // 标识位, 标记是否需要向前推进, 当前线程如果没有竞争到处理这一段数据, 那么就要向前推进尝试获取前一段
+    boolean advance = true;
+    // 标记扩容操作是否完成
+    boolean finishing = false; // to ensure sweep before committing nextTab
+    for (int i = 0, bound = 0;;) {
+        Node<K,V> f; int fh;
+        // 需要向前推进, 循环尝试竞争要处理的段
+        while (advance) {
+            int nextIndex, nextBound;
+            if (--i >= bound || finishing)
+                advance = false;
+            // 已经到数组起始位了, 表示都已经被处理了
+            else if ((nextIndex = transferIndex) <= 0) {
+                i = -1;
+                advance = false;
+            }
+            // 使用CAS形式开始竞争当前线程要处理的段, 每段的大小是stride个, 在数组上从后向前推进, 如果没抢到就向前推进继续抢
+            else if (U.compareAndSwapInt(this, TRANSFERINDEX, nextIndex, nextBound = (nextIndex > stride ? nextIndex - stride : 0))) {
+                bound = nextBound;
+                i = nextIndex - 1;
+                advance = false;
+            }
+        }
+        if (i < 0 || i >= n || i + n >= nextn) {
+            int sc;
+            // 扩容完成, 将新数组赋值给原数组, 同时更新新的扩容阈值
+            if (finishing) {
+                nextTable = null;
+                table = nextTab;
+                sizeCtl = (n << 1) - (n >>> 1);
+                return;
+            }
+            if (U.compareAndSwapInt(this, SIZECTL, sc = sizeCtl, sc - 1)) {
+                if ((sc - 2) != resizeStamp(n) << RESIZE_STAMP_SHIFT)
+                    return;
+                finishing = advance = true;
+                // 标记为扩容完成, 再次检查整个数组, 没必要
+                i = n; // recheck before commit
+            }
+        }
+        // 当前数组元素为null, 直接以CAS形式放置占位结点
+        else if ((f = tabAt(tab, i)) == null)
+            advance = casTabAt(tab, i, null, fwd);
+        // 当前结点正在进行移动, 表示有其他线程处理了这个元素, 那么重新循环并继续向前推进获取前一段进行处理
+        else if ((fh = f.hash) == MOVED)
+            advance = true; // already processed
+        // 迁移当前元素
+        else {
+            // 对当前元素加锁, 保证一个线程操作
+            synchronized (f) {
+                // 二次校验, 防止加锁前当前元素发生变化
+                if (tabAt(tab, i) == f) {
+                    Node<K,V> ln, hn;
+                    // 当前元素是链表
+                    if (fh >= 0) {
+                        // 头结点
+                        int runBit = fh & n;
+                        Node<K,V> lastRun = f;
+                        // 找到链表中最后一个和头结点不同的结点
+                        for (Node<K,V> p = f.next; p != null; p = p.next) {
+                            int b = p.hash & n;
+                            if (b != runBit) {
+                                runBit = b;
+                                lastRun = p;
+                            }
+                        }
+                        if (runBit == 0) {
+                            ln = lastRun;
+                            hn = null;
+                        }
+                        else {
+                            hn = lastRun;
+                            ln = null;
+                        }
+                        // 根据上边获取的结点位置, 将当前链表拆分成两个链表
+                        for (Node<K,V> p = f; p != lastRun; p = p.next) {
+                            int ph = p.hash; K pk = p.key; V pv = p.val;
+                            if ((ph & n) == 0)
+                                ln = new Node<K,V>(ph, pk, pv, ln);
+                            else
+                                hn = new Node<K,V>(ph, pk, pv, hn);
+                        }
+                        // 分别将两个链表赋值到新的Table中
+                        setTabAt(nextTab, i, ln);
+                        setTabAt(nextTab, i + n, hn);
+                        // 给当前元素设置为占位结点, 表示处理完成
+                        setTabAt(tab, i, fwd);
+                        // 标记向前推进
+                        advance = true;
+                    }
+                    // 当前元素是红黑树
+                    else if (f instanceof TreeBin) {
+                        TreeBin<K,V> t = (TreeBin<K,V>)f;
+                        TreeNode<K,V> lo = null, loTail = null;
+                        TreeNode<K,V> hi = null, hiTail = null;
+                        int lc = 0, hc = 0;
+                        for (Node<K,V> e = t.first; e != null; e = e.next) {
+                            int h = e.hash;
+                            TreeNode<K,V> p = new TreeNode<K,V>(h, e.key, e.val, null, null);
+                            if ((h & n) == 0) {
+                                if ((p.prev = loTail) == null)
+                                    lo = p;
+                                else
+                                    loTail.next = p;
+                                loTail = p;
+                                ++lc;
+                            }
+                            else {
+                                if ((p.prev = hiTail) == null)
+                                    hi = p;
+                                else
+                                    hiTail.next = p;
+                                hiTail = p;
+                                ++hc;
+                            }
+                        }
+                        ln = (lc <= UNTREEIFY_THRESHOLD) ? untreeify(lo) : (hc != 0) ? new TreeBin<K,V>(lo) : t;
+                        hn = (hc <= UNTREEIFY_THRESHOLD) ? untreeify(hi) : (lc != 0) ? new TreeBin<K,V>(hi) : t;
+                        setTabAt(nextTab, i, ln);
+                        setTabAt(nextTab, i + n, hn);
+                        setTabAt(tab, i, fwd);
+                        advance = true;
+                    }
+                }
+            }
         }
     }
 }
