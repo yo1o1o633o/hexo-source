@@ -50,293 +50,6 @@ static final <K,V> Node<K,V> tabAt(Node<K,V>[] tab, int i) {
 ```
 
 {% note success %}
-### 链表转红黑树
-treeifyBin(Node<K,V>[] tab, int index)
-{% endnote %}
-
-进入转换方法, 判断Table数组元素数量如果小于64则只进行扩容, 大于等于64个则转成红黑树
-```java
-private final void treeifyBin(Node<K,V>[] tab, int index) {
-    Node<K,V> b; int n, sc;
-    if (tab != null) {
-        // 先判断数组Table的元素个数是否小于64个, 小于的话调用尝试扩容方法
-        if ((n = tab.length) < MIN_TREEIFY_CAPACITY)
-            tryPresize(n << 1);
-        // 大于等于64个元素进行转成红黑树操作
-        else if ((b = tabAt(tab, index)) != null && b.hash >= 0) {
-            synchronized (b) {
-                if (tabAt(tab, index) == b) {
-                    TreeNode<K,V> hd = null, tl = null;
-                    for (Node<K,V> e = b; e != null; e = e.next) {
-                        TreeNode<K,V> p =
-                            new TreeNode<K,V>(e.hash, e.key, e.val, null, null);
-                        if ((p.prev = tl) == null)
-                            hd = p;
-                        else
-                            tl.next = p;
-                        tl = p;
-                    }
-                    setTabAt(tab, index, new TreeBin<K,V>(hd));
-                }
-            }
-        }
-    }
-}
-```
-
-
-
-{% note success %}
-### 添加计数
-fullAddCount(long x, boolean wasUncontended)
-{% endnote %}
-
-添加计数死循环自旋处理, 根据不同情况进入3中条件中
-1. CounterCell[]不为空, 数组长度大于0时, 对数组内元素操作
-2. 如果没有其他线程在初始化数组, 则进行初始化操作, 数组大小为2, 执行完成后标记初始化完成
-3. 尝试对baseCount进行CAS累加操作, 操作成功就跳出循环, 否则进行下次循环进入对数组操作逻辑
-
-```java
-private final void fullAddCount(long x, boolean wasUncontended) {
-    int h;
-    // 线程的探针哈希值未初始化, 则进行初始化操作, 然后获取线程的探针哈希值->h
-    if ((h = ThreadLocalRandom.getProbe()) == 0) {
-        ThreadLocalRandom.localInit();      // force initialization
-        h = ThreadLocalRandom.getProbe();
-        wasUncontended = true;
-    }
-    boolean collide = false;                // True if last slot nonempty
-    for (;;) {
-        CounterCell[] as; CounterCell a; int n; long v;
-        // 数组不为空, 即已经执行完初始化了
-        if ((as = counterCells) != null && (n = as.length) > 0) {
-            // hash对应数组元素为空, 进行创建元素
-            if ((a = as[(n - 1) & h]) == null) {
-                if (cellsBusy == 0) {            // Try to attach new Cell
-                    // 调用有参构造器进行创建对象
-                    CounterCell r = new CounterCell(x); // Optimistic create
-                    if (cellsBusy == 0 && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
-                        boolean created = false;
-                        try {               // Recheck under lock
-                            CounterCell[] rs; int m, j;
-                            if ((rs = counterCells) != null && (m = rs.length) > 0 && rs[j = (m - 1) & h] == null) {
-                                rs[j] = r;
-                                created = true;
-                            }
-                        } finally {
-                            cellsBusy = 0;
-                        }
-                        // 经过一系列判断, 创建成功跳出循环, 否则下次循环
-                        if (created)
-                            break;
-                        continue;           // Slot is now non-empty
-                    }
-                }
-                collide = false;
-            }
-            else if (!wasUncontended)       // CAS already known to fail
-                wasUncontended = true;      // Continue after rehash
-            else if (U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))
-                break;
-            // counterCells数组大小超出CPU核数, 线程的并发数不会超出CPU核数
-            else if (counterCells != as || n >= NCPU)
-                collide = false;            // At max size or stale
-            else if (!collide)
-                collide = true;
-            else if (cellsBusy == 0 && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
-                try {
-                    if (counterCells == as) {// Expand table unless stale
-                        CounterCell[] rs = new CounterCell[n << 1];
-                        for (int i = 0; i < n; ++i)
-                            rs[i] = as[i];
-                        counterCells = rs;
-                    }
-                } finally {
-                    cellsBusy = 0;
-                }
-                collide = false;
-                continue;                   // Retry with expanded table
-            }
-            h = ThreadLocalRandom.advanceProbe(h);
-        }
-        // 数组为空, 则进行创建数组操作
-        else if (cellsBusy == 0 && counterCells == as && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
-            boolean init = false;
-            try {
-                // 初始化CounterCell数组, 数组大小2
-                if (counterCells == as) {
-                    CounterCell[] rs = new CounterCell[2];
-                    rs[h & 1] = new CounterCell(x);
-                    counterCells = rs;
-                    init = true;
-                }
-            } finally {
-                cellsBusy = 0;
-            }
-            if (init)
-                break;
-            }
-        // 尝试对baseCount进行累加操作, 操作成功就跳出循环, 否则进行下次循环进入对数组操作逻辑
-        else if (U.compareAndSwapLong(this, BASECOUNT, v = baseCount, v + x))
-            break;                          // Fall back on using base
-    }
-}
-```
-
-{% note success %}
-### 扩容方法
-transfer(Node<K,V>[] tab, Node<K,V>[] nextTab)
-{% endnote %}
-
-1. 计算stride, 一个线程处理hash表多少个数组元素, 每个元素对应一个桶, 就是表示一个线程处理多少个桶数据，根据当前CPU核数计算要处理的段大小, 最小16个元素
-2. nextTable数组是扩容操作要迁移到的目标数组, 如果nextTable数组为空， 则进行初始化操作, 数组大小为当前数组的2倍
-- 扩容有两种情况, 当前线程扩容和协助扩容
-
-扩容的原理, 多线程可能同时进行扩容, 那么将整个数组根据CPU核数计算出平均的段, 每个线程处理一个段, 当处理完一个元素结点后, 在这个位置放置一个ForwardingNode元素结点占位表示正在处理, 即MOVED
-
-新建一个2倍原数组大小的nextTable数组,用来保存扩容后的新数组
-
-```java
-private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
-    int n = tab.length, stride;
-    // 如果CPU核数大于1, 则当前 stride = 数组大小/8/CPU核数, 如果是单核则为数组大小
-    // 计算结果如果小于16, 则赋值16, 即最小每个线程处理16个元素
-    // 此计算保证每个线程处理的段大小相同, 避免迁移任务出现不均匀
-    if ((stride = (NCPU > 1) ? (n >>> 3) / NCPU : n) < MIN_TRANSFER_STRIDE)
-        stride = MIN_TRANSFER_STRIDE; // subdivide range
-    // 要迁移的数组为null, 则创建2倍大的新数组
-    if (nextTab == null) {            // initiating
-        try {
-            @SuppressWarnings("unchecked")
-            Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n << 1];
-            nextTab = nt;
-        } catch (Throwable ex) {      // try to cope with OOME
-            sizeCtl = Integer.MAX_VALUE;
-            return;
-        }
-        nextTable = nextTab;
-        transferIndex = n;
-    }
-    int nextn = nextTab.length;
-    // 创建ForwardingNode结点, 用来标记正在迁移的元素, hash值为-1
-    ForwardingNode<K,V> fwd = new ForwardingNode<K,V>(nextTab);
-    boolean advance = true;
-    boolean finishing = false; // to ensure sweep before committing nextTab
-    for (int i = 0, bound = 0;;) {
-        Node<K,V> f; int fh;
-        // 为当前线程分配要处理的段位移值
-        while (advance) {
-            int nextIndex, nextBound;
-            if (--i >= bound || finishing)
-                advance = false;
-            else if ((nextIndex = transferIndex) <= 0) {
-                i = -1;
-                advance = false;
-            }
-            else if (U.compareAndSwapInt (this, TRANSFERINDEX, nextIndex, nextBound = (nextIndex > stride ? nextIndex - stride : 0))) {
-                bound = nextBound;
-                i = nextIndex - 1;
-                advance = false;
-            }
-        }
-        if (i < 0 || i >= n || i + n >= nextn) {
-            int sc;
-            // 扩容完成, 将新的table赋值给原table
-            if (finishing) {
-                nextTable = null;
-                table = nextTab;
-                sizeCtl = (n << 1) - (n >>> 1);
-                return;
-            }
-            // 判断是否扩容完成
-            if (U.compareAndSwapInt(this, SIZECTL, sc = sizeCtl, sc - 1)) {
-                if ((sc - 2) != resizeStamp(n) << RESIZE_STAMP_SHIFT)
-                    return;
-                finishing = advance = true;
-                i = n; // recheck before commit
-            }
-        }
-        else if ((f = tabAt(tab, i)) == null)
-            advance = casTabAt(tab, i, null, fwd);
-        else if ((fh = f.hash) == MOVED)
-            advance = true; // already processed
-        else {
-            synchronized (f) {
-                if (tabAt(tab, i) == f) {
-                    Node<K,V> ln, hn;
-                    if (fh >= 0) {
-                        int runBit = fh & n;
-                        Node<K,V> lastRun = f;
-                        for (Node<K,V> p = f.next; p != null; p = p.next) {
-                            int b = p.hash & n;
-                            if (b != runBit) {
-                                runBit = b;
-                                lastRun = p;
-                            }
-                        }
-                        if (runBit == 0) {
-                            ln = lastRun;
-                            hn = null;
-                        }
-                        else {
-                            hn = lastRun;
-                            ln = null;
-                        }
-                        for (Node<K,V> p = f; p != lastRun; p = p.next) {
-                            int ph = p.hash; K pk = p.key; V pv = p.val;
-                            if ((ph & n) == 0)
-                                ln = new Node<K,V>(ph, pk, pv, ln);
-                            else
-                                hn = new Node<K,V>(ph, pk, pv, hn);
-                        }
-                        setTabAt(nextTab, i, ln);
-                        setTabAt(nextTab, i + n, hn);
-                        setTabAt(tab, i, fwd);
-                        advance = true;
-                    }
-                    else if (f instanceof TreeBin) {
-                        TreeBin<K,V> t = (TreeBin<K,V>)f;
-                        TreeNode<K,V> lo = null, loTail = null;
-                        TreeNode<K,V> hi = null, hiTail = null;
-                        int lc = 0, hc = 0;
-                        for (Node<K,V> e = t.first; e != null; e = e.next) {
-                            int h = e.hash;
-                            TreeNode<K,V> p = new TreeNode<K,V>
-                                (h, e.key, e.val, null, null);
-                            if ((h & n) == 0) {
-                                if ((p.prev = loTail) == null)
-                                    lo = p;
-                                else
-                                    loTail.next = p;
-                                loTail = p;
-                                ++lc;
-                            }
-                            else {
-                                if ((p.prev = hiTail) == null)
-                                    hi = p;
-                                else
-                                    hiTail.next = p;
-                                hiTail = p;
-                                ++hc;
-                            }
-                        }
-                        ln = (lc <= UNTREEIFY_THRESHOLD) ? untreeify(lo) :
-                            (hc != 0) ? new TreeBin<K,V>(lo) : t;
-                        hn = (hc <= UNTREEIFY_THRESHOLD) ? untreeify(hi) :
-                            (lc != 0) ? new TreeBin<K,V>(hi) : t;
-                        setTabAt(nextTab, i, ln);
-                        setTabAt(nextTab, i + n, hn);
-                        setTabAt(tab, i, fwd);
-                        advance = true;
-                    }
-                }
-            }
-        }
-    }
-}
-```
-
-{% note success %}
 ### 获取Key的Hash值
 {% endnote %}
 ```java
@@ -603,6 +316,41 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 ```
 
 {% note success %}
+### 链表转红黑树
+treeifyBin(Node<K,V>[] tab, int index)
+{% endnote %}
+
+进入转换方法, 判断Table数组元素数量如果小于64则只进行扩容, 大于等于64个则转成红黑树
+```java
+private final void treeifyBin(Node<K,V>[] tab, int index) {
+    Node<K,V> b; int n, sc;
+    if (tab != null) {
+        // 先判断数组Table的元素个数是否小于64个, 小于的话调用尝试扩容方法
+        if ((n = tab.length) < MIN_TREEIFY_CAPACITY)
+            tryPresize(n << 1);
+        // 大于等于64个元素进行转成红黑树操作
+        else if ((b = tabAt(tab, index)) != null && b.hash >= 0) {
+            synchronized (b) {
+                if (tabAt(tab, index) == b) {
+                    TreeNode<K,V> hd = null, tl = null;
+                    for (Node<K,V> e = b; e != null; e = e.next) {
+                        TreeNode<K,V> p =
+                            new TreeNode<K,V>(e.hash, e.key, e.val, null, null);
+                        if ((p.prev = tl) == null)
+                            hd = p;
+                        else
+                            tl.next = p;
+                        tl = p;
+                    }
+                    setTabAt(tab, index, new TreeBin<K,V>(hd));
+                }
+            }
+        }
+    }
+}
+```
+
+{% note success %}
 ### 批量添加元素
 {% endnote %}
 传入一个Map, 将Map中元素全部添加到当前Map中, 先根据要添加Map的元素个数进行尝试扩容, 然后调用putVal()方法循环添加元素
@@ -845,6 +593,105 @@ private final void addCount(long x, int check) {
 }
 ```
 
+
+
+{% note success %}
+### 添加计数
+fullAddCount(long x, boolean wasUncontended)
+{% endnote %}
+
+添加计数死循环自旋处理, 根据不同情况进入3中条件中
+1. CounterCell[]不为空, 数组长度大于0时, 对数组内元素操作
+2. 如果没有其他线程在初始化数组, 则进行初始化操作, 数组大小为2, 执行完成后标记初始化完成
+3. 尝试对baseCount进行CAS累加操作, 操作成功就跳出循环, 否则进行下次循环进入对数组操作逻辑
+
+```java
+private final void fullAddCount(long x, boolean wasUncontended) {
+    int h;
+    // 线程的探针哈希值未初始化, 则进行初始化操作, 然后获取线程的探针哈希值->h
+    if ((h = ThreadLocalRandom.getProbe()) == 0) {
+        ThreadLocalRandom.localInit();      // force initialization
+        h = ThreadLocalRandom.getProbe();
+        wasUncontended = true;
+    }
+    boolean collide = false;                // True if last slot nonempty
+    for (;;) {
+        CounterCell[] as; CounterCell a; int n; long v;
+        // 数组不为空, 即已经执行完初始化了
+        if ((as = counterCells) != null && (n = as.length) > 0) {
+            // hash对应数组元素为空, 进行创建元素
+            if ((a = as[(n - 1) & h]) == null) {
+                if (cellsBusy == 0) {            // Try to attach new Cell
+                    // 调用有参构造器进行创建对象
+                    CounterCell r = new CounterCell(x); // Optimistic create
+                    if (cellsBusy == 0 && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                        boolean created = false;
+                        try {               // Recheck under lock
+                            CounterCell[] rs; int m, j;
+                            if ((rs = counterCells) != null && (m = rs.length) > 0 && rs[j = (m - 1) & h] == null) {
+                                rs[j] = r;
+                                created = true;
+                            }
+                        } finally {
+                            cellsBusy = 0;
+                        }
+                        // 经过一系列判断, 创建成功跳出循环, 否则下次循环
+                        if (created)
+                            break;
+                        continue;           // Slot is now non-empty
+                    }
+                }
+                collide = false;
+            }
+            else if (!wasUncontended)       // CAS already known to fail
+                wasUncontended = true;      // Continue after rehash
+            else if (U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))
+                break;
+            // counterCells数组大小超出CPU核数, 线程的并发数不会超出CPU核数
+            else if (counterCells != as || n >= NCPU)
+                collide = false;            // At max size or stale
+            else if (!collide)
+                collide = true;
+            else if (cellsBusy == 0 && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                try {
+                    if (counterCells == as) {// Expand table unless stale
+                        CounterCell[] rs = new CounterCell[n << 1];
+                        for (int i = 0; i < n; ++i)
+                            rs[i] = as[i];
+                        counterCells = rs;
+                    }
+                } finally {
+                    cellsBusy = 0;
+                }
+                collide = false;
+                continue;                   // Retry with expanded table
+            }
+            h = ThreadLocalRandom.advanceProbe(h);
+        }
+        // 数组为空, 则进行创建数组操作
+        else if (cellsBusy == 0 && counterCells == as && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+            boolean init = false;
+            try {
+                // 初始化CounterCell数组, 数组大小2
+                if (counterCells == as) {
+                    CounterCell[] rs = new CounterCell[2];
+                    rs[h & 1] = new CounterCell(x);
+                    counterCells = rs;
+                    init = true;
+                }
+            } finally {
+                cellsBusy = 0;
+            }
+            if (init)
+                break;
+            }
+        // 尝试对baseCount进行累加操作, 操作成功就跳出循环, 否则进行下次循环进入对数组操作逻辑
+        else if (U.compareAndSwapLong(this, BASECOUNT, v = baseCount, v + x))
+            break;                          // Fall back on using base
+    }
+}
+```
+
 {% note success %}
 ### 协助扩容
 {% endnote %}
@@ -932,12 +779,12 @@ private final void tryPresize(int size) {
 
 示例:
 使用高位与操作
-1111 1111 1111 1111 1111 1111 0<font color=#FF0000>0</font>01 1010
-0000 0000 0000 0000 0000 0000 0<font color=#FF0000>1</font>00 0000
+11111111 11111111 11111111 0<font color=#FF0000>0</font>011010
+00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
 结果为0
 
-1111 1111 1111 1111 1111 1111 0<font color=#FF0000>1</font>01 1010
-0000 0000 0000 0000 0000 0000 0<font color=#FF0000>1</font>00 0000
+11111111 11111111 11111111 0<font color=#FF0000>1</font>011010
+00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
 结果为1
 
 ```java
@@ -1091,5 +938,27 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
             }
         }
     }
+}
+```
+流程图
+初始化2倍的新数组nextTable
+{% asset_img 2.png %}
+
+
+{% note success %}
+### Unsafe类操作
+{% endnote %}
+```java
+使用Unsafe类进行元素的获取, 比较并赋值, 采用volatile赋值操作
+static final <K,V> Node<K,V> tabAt(Node<K,V>[] tab, int i) {
+    return (Node<K,V>)U.getObjectVolatile(tab, ((long)i << ASHIFT) + ABASE);
+}
+
+static final <K,V> boolean casTabAt(Node<K,V>[] tab, int i, Node<K,V> c, Node<K,V> v) {
+    return U.compareAndSwapObject(tab, ((long)i << ASHIFT) + ABASE, c, v);
+}
+
+static final <K,V> void setTabAt(Node<K,V>[] tab, int i, Node<K,V> v) {
+    U.putObjectVolatile(tab, ((long)i << ASHIFT) + ABASE, v);
 }
 ```
