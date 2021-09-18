@@ -540,16 +540,12 @@ private final Node<K,V>[] initTable() {
 ### 添加计数和检查扩容
 addCount(long x, int check)
 {% endnote %}
-
-- 添加计数
-    为了在并发情况下, 多个线程同时进行添加元素操作, 对总元素个数不能使用普通累加操作, 则采用数值+数组的形式进行处理
-    baseCount：用来进行累加操作
-    CounterCell[]：数组用来当baseCount累加操作失败时保存数据
-    流程：首先CAS对baseCount进行累加操作, 如果操作成功则继续向下, 否则使用CounterCell数组中的一个元素来保存累加数值, 当需要获取总数时, 使用BaseCount和数组的每个元素的总计
-    计数操作完成后判断是否需要扩容, 并进行扩容处理
+此方法执行两个操作
+- 处理元素数量计数, 增加或者减少
+- 判断是否需要扩容, 并进行扩容
 
 ```java
-// 添加计数
+// x表示数量变化数, check大于0表示需要进行扩容检查
 private final void addCount(long x, int check) {
     // CounterCell数组就是保存元素个数的数组
     CounterCell[] as; long b, s;
@@ -567,10 +563,10 @@ private final void addCount(long x, int check) {
         // 如果是不需要检查扩容的调用, 则此处可以直接返回了
         if (check <= 1)
             return;
-        // 统计数组元素个数
+        // 统计数组元素个数, 为后面的扩容检查做准备
         s = sumCount();
     }
-    // 当发生添加操作时进入此逻辑判断是否要对数组扩容
+    // 判断是否要对数组容量进行调整
     if (check >= 0) {
         Node<K,V>[] tab, nt; int n, sc;
         // 此时sizeCtl保存的是扩容阈值, s为当前数组元素个数, 此处判断是否需要扩容
@@ -578,15 +574,23 @@ private final void addCount(long x, int check) {
             int rs = resizeStamp(n);
             // 小于0则表示当前有线程在扩容, 进行协助扩容操作
             if (sc < 0) {
+                // sc >>> RESIZE_STAMP_SHIFT) != rs 扩容已经结束
+                // sc == rs + 1                     扩容已经结束
+                // sc == rs + MAX_RESIZERS          协助扩容线程已经到最大值
+                // (nt = nextTable) == null         扩容已经结束
+                // transferIndex <= 0               扩容任务已经领取完毕, 没有需要处理的元素了
                 if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 || sc == rs + MAX_RESIZERS || (nt = nextTable) == null || transferIndex <= 0)
+                    // 跳出循环
                     break;
+                // 尝试进行协助扩容, 如果CAS竞争到权限, 则执行transfer扩容方法
                 if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1))
                     transfer(tab, nt);
             }
-            // 大于等于0表示开始扩容, 同时将sizeCtl的值设置成负数
+            // 如果当前没有线程在扩容, 则sc为整数, 当前线程尝试进行扩容
             else if (U.compareAndSwapInt(this, SIZECTL, sc, (rs << RESIZE_STAMP_SHIFT) + 2))
                 // 扩容方法
                 transfer(tab, null);
+            // 重新计数, 判断是否需要下一次循环
             s = sumCount();
         }
     }
@@ -599,16 +603,18 @@ private final void addCount(long x, int check) {
 ### 添加计数
 fullAddCount(long x, boolean wasUncontended)
 {% endnote %}
-
-添加计数死循环自旋处理, 根据不同情况进入3中条件中
-1. CounterCell[]不为空, 数组长度大于0时, 对数组内元素操作
-2. 如果没有其他线程在初始化数组, 则进行初始化操作, 数组大小为2, 执行完成后标记初始化完成
-3. 尝试对baseCount进行CAS累加操作, 操作成功就跳出循环, 否则进行下次循环进入对数组操作逻辑
+自旋处理
+1. CounterCell[]数组为初始化, 则执行初始化操作
+2. 如果当前线程并发竞争激烈, 则尝试对baseCount进行CAS累加操作
+3. CounterCell[]数组已经初始化
+    - 如果当前索引有值, 则进行CAS累加操作
+    - 如果当前索引为空, 则进行CAS赋值操作
+    - 当上述CAS操作都失败时, 会判断当前数组尝试是否小于CPU核数, 如果小于则进行扩容 
 
 ```java
 private final void fullAddCount(long x, boolean wasUncontended) {
     int h;
-    // 线程的探针哈希值未初始化, 则进行初始化操作, 然后获取线程的探针哈希值->h
+    // 线程的探针哈希值未初始化, 则进行初始化操作, 然后获取线程的探针哈希值->h, 是一个随机数
     if ((h = ThreadLocalRandom.getProbe()) == 0) {
         ThreadLocalRandom.localInit();      // force initialization
         h = ThreadLocalRandom.getProbe();
@@ -617,17 +623,19 @@ private final void fullAddCount(long x, boolean wasUncontended) {
     boolean collide = false;                // True if last slot nonempty
     for (;;) {
         CounterCell[] as; CounterCell a; int n; long v;
-        // 数组不为空, 即已经执行完初始化了
+        // 数组已经初始化
         if ((as = counterCells) != null && (n = as.length) > 0) {
-            // hash对应数组元素为空, 进行创建元素
+            // 根据当前线程probe获取CounterCell[]数组下标元素
             if ((a = as[(n - 1) & h]) == null) {
                 if (cellsBusy == 0) {            // Try to attach new Cell
-                    // 调用有参构造器进行创建对象
+                    // 构造CounterCell对象, 保存传入的数量
                     CounterCell r = new CounterCell(x); // Optimistic create
+                    // CAS操作, 竞争对数组的操作, 防止其他线程并发操作
                     if (cellsBusy == 0 && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
                         boolean created = false;
                         try {               // Recheck under lock
                             CounterCell[] rs; int m, j;
+                            // 再次判断当前索引位置没有元素, 将CounterCell对象放到对应的索引位置上
                             if ((rs = counterCells) != null && (m = rs.length) > 0 && rs[j = (m - 1) & h] == null) {
                                 rs[j] = r;
                                 created = true;
@@ -635,9 +643,10 @@ private final void fullAddCount(long x, boolean wasUncontended) {
                         } finally {
                             cellsBusy = 0;
                         }
-                        // 经过一系列判断, 创建成功跳出循环, 否则下次循环
+                        // 创建成功,跳出循环
                         if (created)
                             break;
+                        // 说明当前数组索引不为null, 则进行下一次循环
                         continue;           // Slot is now non-empty
                     }
                 }
@@ -645,17 +654,24 @@ private final void fullAddCount(long x, boolean wasUncontended) {
             }
             else if (!wasUncontended)       // CAS already known to fail
                 wasUncontended = true;      // Continue after rehash
+            // 当前索引下标元素不为null, 使用CAS对其进行累加操作
             else if (U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))
                 break;
-            // counterCells数组大小超出CPU核数, 线程的并发数不会超出CPU核数
+            // 如果有其他线程建立了新的counterCells数组或者counterCells数组元素大于CPU核数, 线程的并发数不会超出CPU核数
+            // 即n >= NCPU是不会进行扩容
             else if (counterCells != as || n >= NCPU)
+                // 标记当前线程的循环失败
                 collide = false;            // At max size or stale
+            // 恢复collide状态, 标记下次循环进行扩容
             else if (!collide)
                 collide = true;
+            // 表明当前数组容量不足, 线程竞争激烈, 标记并进行扩容
             else if (cellsBusy == 0 && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
                 try {
                     if (counterCells == as) {// Expand table unless stale
+                        // 扩容2倍容量
                         CounterCell[] rs = new CounterCell[n << 1];
+                        // 迁移到扩容后的数组
                         for (int i = 0; i < n; ++i)
                             rs[i] = as[i];
                         counterCells = rs;
@@ -664,11 +680,13 @@ private final void fullAddCount(long x, boolean wasUncontended) {
                     cellsBusy = 0;
                 }
                 collide = false;
+                // 继续下一次循环
                 continue;                   // Retry with expanded table
             }
+            // 重新计算线程的prode随机值, 即下一次计算的元素下标会变化
             h = ThreadLocalRandom.advanceProbe(h);
         }
-        // 数组为空, 则进行创建数组操作
+        // CAS形式初始化数组, 初始化完成后将传入的数量设置进去, 成功后退出循环
         else if (cellsBusy == 0 && counterCells == as && U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
             boolean init = false;
             try {
@@ -772,20 +790,10 @@ private final void tryPresize(int size) {
 {% note success %}
 ### 扩容操作
 {% endnote %}
-
-迁移操作, 新的数组是原数组容量的二倍, 则进行与运算时, 高位变化只会有1位发生变化, 同时只有两种可能0, 1
-在迁移元素时, 根据与运算将链表下元素拆分成两个链表
-将都为0的链表保存在和原数组对应的索引位置上, 将都为1的链表保存在原数组对应索引位+数组长度的索引位置上
-
-示例:
-使用高位与操作
-11111111 11111111 11111111 0<font color=#FF0000>0</font>011010
-00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
-结果为0
-
-11111111 11111111 11111111 0<font color=#FF0000>1</font>011010
-00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
-结果为1
+1. 根据当前服务器CPU计算每个线程每次处理的元素个数(数组上的一段元素)
+2. 从数组末尾, 以CAS形式尝试竞争一段元素的处理权, 此操作是从数组末尾向前取值. 如果竞争失败了就尝试取前一段元素
+3. 竞争到处理权限后, 开始进行迁移操作, 根据元素结点的类型是链表还是红黑树进行分别处理
+4. 迁移完成后使用ForwardingNode结点进行占位, 表示当前元素结点已经处理完成
 
 ```java
 private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
@@ -843,7 +851,13 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
                 sizeCtl = (n << 1) - (n >>> 1);
                 return;
             }
+            // 使用CAS对sizeCtl的低16位进行-1操作, 表示当前线程处理完成
             if (U.compareAndSwapInt(this, SIZECTL, sc = sizeCtl, sc - 1)) {
+                // 第一个线程开始扩容时会设置sizeCtl为resizeStamp(n) << RESIZE_STAMP_SHIFT
+                // 每一个线程加入进来sizeCtl + 1
+                // 每一个线程完成后退出sizeCtl - 1
+                // 当最后一个线程退出后一定会有(sc - 2) == resizeStamp(n) << RESIZE_STAMP_SHIFT)
+                // 如果这个条件不满足, 说明扩容已经结束了
                 if ((sc - 2) != resizeStamp(n) << RESIZE_STAMP_SHIFT)
                     return;
                 finishing = advance = true;
@@ -851,7 +865,7 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
                 i = n; // recheck before commit
             }
         }
-        // 当前数组元素为null, 直接以CAS形式放置占位结点
+        // 当前数组元素为null, 直接以CAS形式放置占位结点表示已处理
         else if ((f = tabAt(tab, i)) == null)
             advance = casTabAt(tab, i, null, fwd);
         // 当前结点正在进行移动, 表示有其他线程处理了这个元素, 那么重新循环并继续向前推进获取前一段进行处理
@@ -866,10 +880,10 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
                     Node<K,V> ln, hn;
                     // 当前元素是链表
                     if (fh >= 0) {
-                        // 头结点
+                        // 计算头结点是高位0结点还是高位1结点
                         int runBit = fh & n;
                         Node<K,V> lastRun = f;
-                        // 找到链表中最后一个和头结点不同的结点
+                        // 如果头结点是高位0结点, 那么这里找到链表尾部连续的高位1结点, 反之亦然, 赋值给lastRun, runBit
                         for (Node<K,V> p = f.next; p != null; p = p.next) {
                             int b = p.hash & n;
                             if (b != runBit) {
@@ -877,15 +891,17 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
                                 lastRun = p;
                             }
                         }
+                        // 链表尾部连续结点是高位0结点, 那么lastRun赋值给ln, ln高位0链表
                         if (runBit == 0) {
                             ln = lastRun;
                             hn = null;
                         }
+                        // 链表尾部连续结点是高位1结点, 那么lastRun赋值给hn, hn高位1链表
                         else {
                             hn = lastRun;
                             ln = null;
                         }
-                        // 根据上边获取的结点位置, 将当前链表拆分成两个链表
+                        // 采用头插形式将链表中的元素根据高位0或者高位1保存到ln和hn链表中, 即根据高位是0或者1拆分成了两个链表
                         for (Node<K,V> p = f; p != lastRun; p = p.next) {
                             int ph = p.hash; K pk = p.key; V pv = p.val;
                             if ((ph & n) == 0)
@@ -893,8 +909,9 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
                             else
                                 hn = new Node<K,V>(ph, pk, pv, hn);
                         }
-                        // 分别将两个链表赋值到新的Table中
+                        // 将高位0的链表插入到新数组中, 索引位置和原数组相同
                         setTabAt(nextTab, i, ln);
+                        // 将高位1的链表插入到新数组中, 索引位置是原数组索引位置间隔数组长度的索引位
                         setTabAt(nextTab, i + n, hn);
                         // 给当前元素设置为占位结点, 表示处理完成
                         setTabAt(tab, i, fwd);
@@ -940,20 +957,49 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
     }
 }
 ```
-流程图
-初始化2倍的新数组nextTable
-{% asset_img 2.png %}
+迁移操作
+新的数组是原数组容量的二倍, 则进行与运算时, 高位变化只会有1位发生变化, 同时只有两种可能0, 1
+在迁移元素时, 根据与运算将链表下元素拆分成两个链表
+将都为0的链表保存在和原数组对应的索引位置上, 将都为1的链表保存在原数组对应索引位+数组长度的索引位置上
+
+示例:
+```java
+int runBit = fh & n;
+```
+使用高位与操作
+11111111 11111111 11111111 0<font color=#FF0000>0</font>011010
+00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
+结果为0
+
+11111111 11111111 11111111 0<font color=#FF0000>1</font>011010
+00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
+结果为1
+
+链表结点迁移流程图
+1. 计算头结点是高位0结点还是高位1结点
+2. 找出与头结点高位不相同的连续的链表尾部结点
+3. 遍历链表, 根据元素结点是高位0还是高位1采用头插法分别保存在两个链表中ln,hn
+4. 将两个链表保存到新数组的两个索引位置, 高位0保存在和原数组相同的索引位置, 高位1保存到原数组索引+原数组长度的索引位置
+{% asset_img 3.png %}
+
+红黑树结点迁移
+1. 计算每个红黑树结点, 判断是高位0还是高位1
+2. 根据高位0和高位1拆分成两个链表, 新链表采用尾插法
+3. 将两个新链表保存到新数组中, 插入位置的选择同上
+4. 如果拆分后的链表长度超过8个元素, 则转成红黑树
 
 
 {% note success %}
 ### Unsafe类操作
 {% endnote %}
+数组table虽然加了volatile属性, 但是此时volatile语义只对数组的引入生效, 而不是数组元素, 此时如果有其他线程对元素进行读写操作, 不一定可以获得最新值
 ```java
-使用Unsafe类进行元素的获取, 比较并赋值, 采用volatile赋值操作
+// 采用Unsafe基于反射以volatile读的形式读取元素结点, 保证了其他线程修改当前线程的元素可见性
 static final <K,V> Node<K,V> tabAt(Node<K,V>[] tab, int i) {
     return (Node<K,V>)U.getObjectVolatile(tab, ((long)i << ASHIFT) + ABASE);
 }
 
+// 采用Unsafe直接对内存进行比较并赋值
 static final <K,V> boolean casTabAt(Node<K,V>[] tab, int i, Node<K,V> c, Node<K,V> v) {
     return U.compareAndSwapObject(tab, ((long)i << ASHIFT) + ABASE, c, v);
 }
