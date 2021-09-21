@@ -8,24 +8,56 @@ tags:
 ---
 
 {% note success %}
-### 特点
+### 基本信息
 {% endnote %}
 - 利用CAS自旋锁+Synchronized保证并发安全的Map
 - 使用数组+链表+红黑树实现
 - key和value不能为null
 
+1. 构造函数进行初始化数组容量, 会根据传入容量进行计算. 实际容量高于传入的容量
+2. 支持多线程同时扩容, 其他线程发现当前数组在扩容时会进行协助扩容
+3. 元素计数采用baseCount和数组形式以支持多线程并发更新计数
+4. 获取元素时不需要加锁
+
 {% note success %}
-### 注意
+### 常量和变量
 {% endnote %}
-1. 初始化容量计算
-    初始容量采用公式 n + n / 2 + 1, 例如创建时指定32, 则根据公式  32 + 32 / 2 + 1 = 49.  然后会取49之后的2的幂数是64
-2. 多线程协助扩容
-    在扩容过程中会根据CPU按段对数组进行迁移处理, 对处理过的元素进行标记, 当有另一个线程添加元素发现是标记元素时, 则协助扩容, 也领取一段元素进行扩容处理
-    处理完成后再次循环领取任务处理, 处理是从数组末尾向前处理的, 最小的段大小是16个元素
-3. 元素数量计数
-    元素计数采用CAS赋值和赋值失败对数组元素赋值的方式进行, CAS对baseCount累加失败, 则循环对数组中的元素进行累加操作, 数组累加操作成功一次就跳出, 失败则重新计算索引再次尝试累加
-    总元素个数是baseCount+数组元素累加的值
-4. 大量的使用CAS自旋操作, 以避免使用锁
+
+```java
+// 表的最大可能容量
+private static final int MAXIMUM_CAPACITY = 1 << 30;
+// 表的默认初始容量
+private static final int DEFAULT_CAPACITY = 16;
+// 链表转成红黑树的阈值, 将元素添加到至少具有这么多节点的链表时, 链表会转换为树. 该值必须大于2, 并且应至少为8
+static final int TREEIFY_THRESHOLD = 8;
+// 红黑树收缩为链表的阈值
+static final int UNTREEIFY_THRESHOLD = 6;
+// 将链表转成红黑树的数组容量阈值, 数组容量超过这个阈值会转红黑树, 否则会对数组扩容
+static final int MIN_TREEIFY_CAPACITY = 64;
+// 扩容迁移数组过程中, 每个线程处理的最小数据元素数, 即每个线程领取的任务数量
+private static final int MIN_TRANSFER_STRIDE = 16;
+// sizeCtl 中用于生成标记的位数. 对于32位数组, 必须至少为6
+private static int RESIZE_STAMP_BITS = 16;
+// 协助扩容的最大线程数
+private static final int MAX_RESIZERS = (1 << (32 - RESIZE_STAMP_BITS)) - 1;
+// sizeCtl中记录大小标记的位移位
+private static final int RESIZE_STAMP_SHIFT = 32 - RESIZE_STAMP_BITS;
+
+// 保存桶的数组, 第一次插入数据延迟初始化, 始终是2的幂次方
+transient volatile Node<K,V>[] table;
+// 用于扩容时迁移使用, 只会在扩容时非空
+private transient volatile Node<K,V>[] nextTable;
+// 基本计数保存遍历, 在没有线程争用时使用, 也会在表初始化竞争期间的后备使用, 采用CAS更新
+private transient volatile long baseCount;
+// 关键状态参数
+private transient volatile int sizeCtl;
+// 扩容时下一个要处理的索引
+private transient volatile int transferIndex;
+// 调整大小和/或创建 CounterCell 时使用的自旋锁(通过 CAS 锁定)
+private transient volatile int cellsBusy;
+// 计数器数据表, 当baseCount线程竞争时使用, 当非空时, 大小是 2 的幂。
+private transient volatile CounterCell[] counterCells;
+```
 
 {% note success %}
 ### 关键参数sizeCtl
@@ -34,20 +66,7 @@ tags:
 1. sizeCtl为0, 表示数组未初始化, 且初始容量为16
 2. sizeCtl为正数, 如果数组未初始化，则记录的是数组初始容量，如果已经初始化，则记录数组扩容阈值（初始容量*0.75）
 3. sizeCtl为-1， 表示数组正在初始化
-4. sizeCtl小于0且不是-1，表示数组正在扩容,-(1-n)表示n个线程正在对数组扩容
-
-{% note success %}
-### 获取元素
-tabAt(Node<K,V>[] tab, int i)
-{% endnote %}
-传入数组Table和数组下标, 获取下标对应的元素
-table是用volatile修饰的, 但是无法保证线程每次都能拿到table最新元素
-使用Unsafe.getObjectVolatie()获取索引元素, 这个方法可以直接获取内存的数据, 保证每次拿到数据都是最新的
-```java
-static final <K,V> Node<K,V> tabAt(Node<K,V>[] tab, int i) {
-    return (Node<K,V>)U.getObjectVolatile(tab, ((long)i << ASHIFT) + ABASE);
-}
-```
+4. sizeCtl小于0且不是-1，表示当前正在扩容的线程数. -(1 + 扩容线程数)
 
 {% note success %}
 ### 获取Key的Hash值
@@ -62,7 +81,7 @@ static final int spread(int h) {
 {% note success %}
 ### 计算初始容量
 {% endnote %}
-初始容量一定是2的幂次, 根据构造函数可知调用此方法传入的一定不是个2的幂次, 因为有+1操作
+返回一个大于等于传入数值的2的幂次方数
 ```java
 private static final int tableSizeFor(int c) {
     int n = c - 1;
@@ -78,14 +97,15 @@ private static final int tableSizeFor(int c) {
 {% note success %}
 ### 构造方法
 {% endnote %}
-空参的构造方法, 什么都不做, 会在对Map操作时使用默认容量(16)初始化
+空参的构造方法, 会在对Map操作时使用默认容量(16)进行初始化
 ```java
 public ConcurrentHashMap() {
 }
 ```
-传入初始容量构造方法, 根据传入的初始容量计算实际的初始容量, 并向sizeCtl参数赋值, 因为数组还未初始化, sizeCtl表示初始容量
+传入初始容量构造方法, 根据传入的初始容量计算实际的初始容量, 并向sizeCtl参数赋值, 因为数组还未初始化, sizeCtl表示初始容量, tableSizeFor方法会返回一个2的幂次方数
+示例: 
 initialCapacity + (initialCapacity >>> 1) + 1 = 16 + 16 / 2 + 1 = 25
-调用tableSizeFor方法获取最近的2的幂次
+tableSizeFor(25) = 32
 ```java
 public ConcurrentHashMap(int initialCapacity) {
     if (initialCapacity < 0)
@@ -152,6 +172,12 @@ public boolean isEmpty() {
 {% note success %}
 ### 获取元素
 {% endnote %}
+1. 计算Key的Hash值
+2. 通过Hash值在数组中获取元素
+3. 如果存在则比较Key值是否相等, 相等则表示找到元素,直接返回Value
+4. 如果hash为负表示正在扩容或者时红黑树结点, 调用结点find方法查找并返回
+5. 如果是链表, 则遍历链表找到对于的key值并返回Value
+6. 获取元素不需要加锁, tabAt采用Volatile方式读取内存的数据, 保证线程可见性, 如果是扩容则会使用find方法找到nextTable中的元素
 ```java
 public V get(Object key) {
     Node<K,V>[] tab; Node<K,V> e, p; int n, eh; K ek;
@@ -182,7 +208,7 @@ public V get(Object key) {
 {% note success %}
 ### KEY是否存在
 {% endnote %}
-调用获取元素方法进行判断
+调用get方法进行判断
 ```java
 public boolean containsKey(Object key) {
     return get(key) != null;
@@ -192,7 +218,7 @@ public boolean containsKey(Object key) {
 {% note success %}
 ### VALUE是否存在
 {% endnote %}
-找到一个VALUE, 最坏可能遍历整个Map, 性能很慢
+找到一个Value, 最坏可能遍历整个Map, 性能很慢
 通过Traverser对象构建的迭代器进行查找
 ```java
 public boolean containsValue(Object value) {
@@ -228,11 +254,12 @@ public V put(K key, V value) {
 添加元素操作会有多线程并发处理情况, 采用CAS赋值和synchronized加锁的形式保证线程安全
 1. 如果table为null, 则表示还未初始化, 调用初始化方法
 2. 如果table已经初始化, 同时hash对应的数组元素为null, 则直接进行CAS赋值操作, 成功则跳出循环, 失败则重新进入循环
-3. 如果当前元素hash为-1, 则表示当前元素正在进行扩容移动, 调用协助扩容方法
+3. 如果当前元素hash为-1, 则表示当前元素正在进行扩容移动, 进行协助扩容
 4. 以上都不成立, 表明当前数组元素有值, 对这个元素加synchronized后进行遍历处理
     - 链表: 如果key在链表中存在, 则进行覆盖, 否则添加到链表尾部
     - 红黑树: 使用红黑树对象方法进行处理
-
+5. 检查是否符合链表转成红黑树条件, 符合进行转换
+6. 元素计数操作同时进行扩容检查
 ```java
 final V putVal(K key, V value, boolean onlyIfAbsent) {
     // 校验下key和value不能为null
@@ -452,7 +479,7 @@ final V replaceNode(Object key, V value, Object cv) {
 ```
 
 {% note success %}
-### 清空MAP
+### 清空Map
 {% endnote %}
 遍历数组, 对每个元素进行清空操作, 如果元素为null则跳过, 如果当前元素正在进行扩容, 则协助扩容后重置数组遍历索引, 重新遍历数组进行清空操作
 ```java
@@ -500,10 +527,12 @@ initTable()
 {% endnote %}
 数组未初始化, 则进行初始化操作, 初始化依赖sizeCtl参数
 sizeCtl如果小于0则表示已经有线程在初始化, 当前线程让出CPU, 否则采用CAS方式争夺初始化操作权, 多线程并发情况, 同时进行CAS竞争, 竞争成功的进行初始化操作, 竞争失败的让除CPU时间片等待初始化完成
-竞争成功的线程将sizeCtl设置成-1, 表明数组正在进行初始化
-初始化完成后将sizeCtl设置为扩容阈值
-扩容阈值计算sc = n - (n >>> 2)
-例如: n = 16, 则 16 - 16 / 2 / 2 = 12, 即16 * 0.75 = 12, 扩容阈值为12, 当元素数量达到12个时会触发扩容操作. 右移操作替代除法, 提高运算效率
+竞争成功的线程将sizeCtl设置成-1, 表明数组正在进行初始化, 初始化完成后将sizeCtl设置为扩容阈值
+计算扩容阈值使用右移操作替代除法, 提高运算效率: sc = n - (n >>> 2), 
+示例: 
+n = 16
+sc = n - (n >>> 2) = 16 - 16 / 2 / 2 = 12, 即16 * 0.75 = 12
+扩容阈值为12, 当元素数量达到12个时会触发扩容操作
 
 ```java
 private final Node<K,V>[] initTable() {
@@ -537,7 +566,7 @@ private final Node<K,V>[] initTable() {
 ```
 
 {% note success %}
-### 添加计数和检查扩容
+### 添加计数和扩容检查
 addCount(long x, int check)
 {% endnote %}
 此方法执行两个操作
@@ -957,11 +986,6 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
     }
 }
 ```
-迁移操作
-新的数组是原数组容量的二倍, 则进行与运算时, 高位变化只会有1位发生变化, 同时只有两种可能0, 1
-在迁移元素时, 根据与运算将链表下元素拆分成两个链表
-将都为0的链表保存在和原数组对应的索引位置上, 将都为1的链表保存在原数组对应索引位+数组长度的索引位置上
-
 示例:
 ```java
 int runBit = fh & n;
@@ -975,12 +999,11 @@ int runBit = fh & n;
 00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
 结果为1
 
-链表结点迁移流程图
+链表结点迁移
 1. 计算头结点是高位0结点还是高位1结点
-2. 找出与头结点高位不相同的连续的链表尾部结点
+2. 找出与头结点高位不相同的连续链表尾部结点
 3. 遍历链表, 根据元素结点是高位0还是高位1采用头插法分别保存在两个链表中ln,hn
-4. 将两个链表保存到新数组的两个索引位置, 高位0保存在和原数组相同的索引位置, 高位1保存到原数组索引+原数组长度的索引位置
-{% asset_img 3.png %}
+4. 将两个链表分别保存到新数组的索引位置, 高位0保存在和原数组相同的索引位置, 高位1保存到原数组索引+原数组长度的索引位置
 
 红黑树结点迁移
 1. 计算每个红黑树结点, 判断是高位0还是高位1
