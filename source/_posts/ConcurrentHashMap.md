@@ -1004,13 +1004,17 @@ int runBit = fh & n;
 2. 找出与头结点高位不相同的连续链表尾部结点
 3. 遍历链表, 根据元素结点是高位0还是高位1采用头插法分别保存在两个链表中ln,hn
 4. 将两个链表分别保存到新数组的索引位置, 高位0保存在和原数组相同的索引位置, 高位1保存到原数组索引+原数组长度的索引位置
+{% asset_img concurrentHashMap2.png %}
+{% asset_img concurrentHashMap3.png %}
+
 
 红黑树结点迁移
 1. 计算每个红黑树结点, 判断是高位0还是高位1
 2. 根据高位0和高位1拆分成两个链表, 新链表采用尾插法
 3. 将两个新链表保存到新数组中, 插入位置的选择同上
 4. 如果拆分后的链表长度超过8个元素, 则转成红黑树
-
+{% asset_img concurrentHashMap4.png %}
+{% asset_img concurrentHashMap1.png %}
 
 {% note success %}
 ### Unsafe类操作
@@ -1031,3 +1035,6 @@ static final <K,V> void setTabAt(Node<K,V>[] tab, int i, Node<K,V> v) {
     U.putObjectVolatile(tab, ((long)i << ASHIFT) + ABASE, v);
 }
 ```
+
+
+参考: https://blog.csdn.net/luzhensmart/article/details/105968886
