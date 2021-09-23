@@ -258,9 +258,13 @@ final V putVal(int hash, K key, V value, boolean onlyIfAbsent, boolean evict) {
 {% endnote %}
 ```java
 final Node<K,V>[] resize() {
+    // 原数组
     Node<K,V>[] oldTab = table;
+    // 扩容前的数组长度
     int oldCap = (oldTab == null) ? 0 : oldTab.length;
+    // 扩容前的扩容阈值
     int oldThr = threshold;
+    // 定义新的数组容量, 新的扩容阈值
     int newCap, newThr = 0;
     if (oldCap > 0) {
         // 数组已经到达最大容量了, 不能扩容, 同时将threshold设置为最大值, 以后就不会扩容了
@@ -270,10 +274,13 @@ final Node<K,V>[] resize() {
         }
         // 计算新容量, 新容量为原容量的2倍
         else if ((newCap = oldCap << 1) < MAXIMUM_CAPACITY && oldCap >= DEFAULT_INITIAL_CAPACITY)
+            // 扩容阈值也设为原来的2倍
             newThr = oldThr << 1; // double threshold
     }
+    // 使用初始扩容阈值初始化容量
     else if (oldThr > 0) // initial capacity was placed in threshold
         newCap = oldThr;
+    // 使用默认参数设置
     else {               // zero initial threshold signifies using defaults
         newCap = DEFAULT_INITIAL_CAPACITY;
         newThr = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
@@ -309,6 +316,7 @@ final Node<K,V>[] resize() {
                     do {
                         next = e.next;
                         // 计算高位是1还是0, 这里e.hash & oldCap 计算得到的是0或者原容量(16)
+                        // 分别组装成2个链表
                         if ((e.hash & oldCap) == 0) {
                             if (loTail == null)
                                 loHead = e;
@@ -324,6 +332,7 @@ final Node<K,V>[] resize() {
                             hiTail = e;
                         }
                     } while ((e = next) != null);
+                    // 将两个链表分别保存到新数组中
                     if (loTail != null) {
                         loTail.next = null;
                         newTab[j] = loHead;
