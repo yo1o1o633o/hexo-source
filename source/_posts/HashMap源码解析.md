@@ -14,7 +14,24 @@ tags:
 1. 非并发安全的Map容器
 2. 可预估存储数据量提前指定初始容量避免扩容的性能损耗
 3. 容量总是2的幂次方
+4. 当链表长度超过8同时数组长度超过64时, 会将链表转成红黑树
 
+{% note success %}
+### 关键参数
+{% endnote %}
+threshold: 扩容阈值, 这个数值是根据初始容量和负载因子计算得到的, 即默认 16 * 0.75 = 12, 当数组元素超出这个阈值时就会进行扩容, 每次扩容2倍容量
+loadFactor: 负载因子, 用来计算扩容阈值. 这个值不建议更改, 当内存紧张而效率要求不高时, 可以增加负载因子loadFactor的值, 内存空间很多而对时间效率要求很高,可以降低负载因子loadFactor的值
+size: 实际的键值对数量
+```java
+// 保存元素的数组, 每个元素对应一个链表
+transient Node<K,V>[] table;
+// 实际的键值对数量
+transient int size;
+// 扩容阈值, 数组最多容纳元素个数, 超出即触发扩容
+int threshold;
+// 负载因子, 默认0.75
+final float loadFactor;
+```
 
 {% note success %}
 ### 构造方法
@@ -58,12 +75,40 @@ public HashMap(Map<? extends K, ? extends V> m) {
 {% note success %}
 ### Hash计算
 {% endnote %}
+1. 获取Key的hashCode
+2. 高位参与运算
 ```java
 static final int hash(Object key) {
     int h;
     return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
 }
 ```
+3. 实际使用, 因为长度总是2的幂次方, 这个操作等同于hash % n, 即Hash值和长度取模, 而使用&操作比取模操作效率更高
+```java
+(n - 1) & hash
+```
+示例:
+```
+h = key.hashCode()
+1111 1111 1111 1111 1111 0000 1110 1010
+
+h >>> 16:            
+0000 0000 0000 0000 1111 1111 1111 1111
+
+h ^ h >>> 16:    
+1111 1111 1111 1111 1111 0000 1110 1010  
+0000 0000 0000 0000 1111 1111 1111 1111     ^    
+----------------------------------------------  
+1111 1111 1111 1111 0000 1111 0001 0101 
+
+(n - 1) & hash
+1111 1111 1111 1111 0000 1111 0001 0101 
+0000 0000 0000 0000 0000 0000 0000 1111     &
+----------------------------------------------
+0000 0000 0000 0000 0000 0000 0000 0101
+
+结果为5
+``` 
 
 {% note success %}
 ### 添加Map
@@ -154,10 +199,10 @@ public V put(K key, V value) {
 ```java
 final V putVal(int hash, K key, V value, boolean onlyIfAbsent, boolean evict) {
     Node<K,V>[] tab; Node<K,V> p; int n, i;
-    // 数组为空, 则初始化
+    // 数组为空, 则执行resize进行扩容
     if ((tab = table) == null || (n = tab.length) == 0)
         n = (tab = resize()).length;
-    // 当前计算的数组下标为空, 则直接添加结点到该下标位置
+    // 根据Key计算数组索引, 当前索引元素为空, 则直接新建结点添加到该索引位置
     if ((p = tab[i = (n - 1) & hash]) == null)
         tab[i] = newNode(hash, key, value, null);
     // 索引下标有值, 出现了Hash冲突的Key
@@ -200,6 +245,7 @@ final V putVal(int hash, K key, V value, boolean onlyIfAbsent, boolean evict) {
         }
     }
     ++modCount;
+    // 超过扩容阈值, 进行扩容
     if (++size > threshold)
         resize();
     afterNodeInsertion(evict);
@@ -217,7 +263,7 @@ final Node<K,V>[] resize() {
     int oldThr = threshold;
     int newCap, newThr = 0;
     if (oldCap > 0) {
-        // 数组已经到达最大容量了, 不能扩容
+        // 数组已经到达最大容量了, 不能扩容, 同时将threshold设置为最大值, 以后就不会扩容了
         if (oldCap >= MAXIMUM_CAPACITY) {
             threshold = Integer.MAX_VALUE;
             return oldTab;
@@ -262,6 +308,7 @@ final Node<K,V>[] resize() {
                     Node<K,V> next;
                     do {
                         next = e.next;
+                        // 计算高位是1还是0, 这里e.hash & oldCap 计算得到的是0或者原容量(16)
                         if ((e.hash & oldCap) == 0) {
                             if (loTail == null)
                                 loHead = e;
@@ -292,6 +339,41 @@ final Node<K,V>[] resize() {
     return newTab;
 }
 ```
+示例:
+如有以下两个Key的Hash值
+11111111 11111111 00001111 00000101
+11111111 11111111 00001111 00010101
+通过上面的计算可知, 虽然这两个Key的Hash值不同, 但是最后4位二进制相同. 索引进行&运算后会放在同一个元素桶里, 以链表的形式存储
+即:
+11111111 11111111 00001111 00000101
+00000000 00000000 00000000 00001111
+00000000 00000000 00000000 0000<font color=#FF0000>0101</font>  =  5
+
+11111111 11111111 00001111 00010101
+00000000 00000000 00000000 00001111
+00000000 00000000 00000000 0000<font color=#FF0000>0101</font>  =  5
+
+那么此时需要扩容二倍, 索引的计算变成如下, 因为容量多了1位参与了运算
+11111111 11111111 00001111 00000101
+00000000 00000000 00000000 00011111
+00000000 00000000 00000000 000<font color=#FF0000>00101</font>  =  5
+
+11111111 11111111 00001111 00010101
+00000000 00000000 00000000 00011111
+00000000 00000000 00000000 000<font color=#FF0000>10101</font>  =  21
+
+在原容量16的情况下, 最后4位参与位运算, 在扩容2倍后容量为32时, 最后5位参与运算.
+那么可知, 当扩容前在同一个元素位置的链表中的元素, 在容量扩大2倍时, 要么在原来的索引位置即5, 要么就在原索引+原容量的索引位置上即5 + 16 = 21
+
+只需要判断Key的Hash值的第5位是0还是1, 即可知道Key在扩容后的元素索引位置
+代码中e.hash & oldCap 判断等于0还是旧容量, 这里是与oldCap = 16计算, 而在获取元素时是与(数组长度-1)计算
+11111111 11111111 00001111 00000101
+00000000 00000000 00000000 00010000
+结果为0
+11111111 11111111 00001111 00010101
+00000000 00000000 00000000 00010000
+结果为1
+通过上述判断将一个链表根据高位的不同拆分成了两个链表
 
 {% note success %}
 ### 链表转红黑树
@@ -300,7 +382,7 @@ final Node<K,V>[] resize() {
 ```java
 final void treeifyBin(Node<K,V>[] tab, int hash) {
     int n, index; Node<K,V> e;
-    // 数组长度小于64, 进行扩容
+    // 数组长度小于64, 才会进行扩容
     if (tab == null || (n = tab.length) < MIN_TREEIFY_CAPACITY)
         resize();
     else if ((e = tab[index = (n - 1) & hash]) != null) {
@@ -339,8 +421,10 @@ final Node<K,V> removeNode(int hash, Object key, Object value, boolean matchValu
     Node<K,V>[] tab; Node<K,V> p; int n, index;
     if ((tab = table) != null && (n = tab.length) > 0 && (p = tab[index = (n - 1) & hash]) != null) {
         Node<K,V> node = null, e; K k; V v;
+        // 要移除的是头结点
         if (p.hash == hash && ((k = p.key) == key || (key != null && key.equals(k))))
             node = p;
+        // 在链表或者红黑树中找到要移除的结点
         else if ((e = p.next) != null) {
             if (p instanceof TreeNode)
                 node = ((TreeNode<K,V>)p).getTreeNode(hash, key);
@@ -354,11 +438,15 @@ final Node<K,V> removeNode(int hash, Object key, Object value, boolean matchValu
                 } while ((e = e.next) != null);
             }
         }
+        // 移除结点操作
         if (node != null && (!matchValue || (v = node.value) == value || (value != null && value.equals(v)))) {
+            // 红黑树结点的移除
             if (node instanceof TreeNode)
                 ((TreeNode<K,V>)node).removeTreeNode(this, tab, movable);
+            // 链表头结点的移除
             else if (node == p)
                 tab[index] = node.next;
+            // 链表中的结点移除
             else
                 p.next = node.next;
             ++modCount;
