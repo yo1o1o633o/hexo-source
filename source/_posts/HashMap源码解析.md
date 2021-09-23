@@ -9,6 +9,14 @@ tags:
 ---
 
 {% note success %}
+### 基本信息
+{% endnote %}
+1. 非并发安全的Map容器
+2. 可预估存储数据量提前指定初始容量避免扩容的性能损耗
+3. 容量总是2的幂次方
+
+
+{% note success %}
 ### 构造方法
 {% endnote %}
 自定义容量和负载因子, 容量不能超过MAXIMUM_CAPACITY, 容量会使用tableSizeFor方法计算出最近的2的幂次方数
@@ -47,6 +55,19 @@ public HashMap(Map<? extends K, ? extends V> m) {
 }
 ```
 
+{% note success %}
+### Hash计算
+{% endnote %}
+```java
+static final int hash(Object key) {
+    int h;
+    return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+}
+```
+
+{% note success %}
+### 添加Map
+{% endnote %}
 ```java
 final void putMapEntries(Map<? extends K, ? extends V> m, boolean evict) {
     // 准备添加的Map元素数量
@@ -269,5 +290,99 @@ final Node<K,V>[] resize() {
         }
     }
     return newTab;
+}
+```
+
+{% note success %}
+### 链表转红黑树
+{% endnote %}
+如果数组长度小于64时, 会进行扩容而不是转换
+```java
+final void treeifyBin(Node<K,V>[] tab, int hash) {
+    int n, index; Node<K,V> e;
+    // 数组长度小于64, 进行扩容
+    if (tab == null || (n = tab.length) < MIN_TREEIFY_CAPACITY)
+        resize();
+    else if ((e = tab[index = (n - 1) & hash]) != null) {
+        TreeNode<K,V> hd = null, tl = null;
+        do {
+            TreeNode<K,V> p = replacementTreeNode(e, null);
+            if (tl == null)
+                hd = p;
+            else {
+                p.prev = tl;
+                tl.next = p;
+            }
+            tl = p;
+        } while ((e = e.next) != null);
+        if ((tab[index] = hd) != null)
+            hd.treeify(tab);
+    }
+}
+```
+
+{% note success %}
+### 移除元素
+{% endnote %}
+```java
+public V remove(Object key) {
+    Node<K,V> e;
+    return (e = removeNode(hash(key), key, null, false, true)) == null ? null : e.value;
+}
+```
+
+{% note success %}
+### 移除元素结点
+{% endnote %}
+```java
+final Node<K,V> removeNode(int hash, Object key, Object value, boolean matchValue, boolean movable) {
+    Node<K,V>[] tab; Node<K,V> p; int n, index;
+    if ((tab = table) != null && (n = tab.length) > 0 && (p = tab[index = (n - 1) & hash]) != null) {
+        Node<K,V> node = null, e; K k; V v;
+        if (p.hash == hash && ((k = p.key) == key || (key != null && key.equals(k))))
+            node = p;
+        else if ((e = p.next) != null) {
+            if (p instanceof TreeNode)
+                node = ((TreeNode<K,V>)p).getTreeNode(hash, key);
+            else {
+                do {
+                    if (e.hash == hash && ((k = e.key) == key || (key != null && key.equals(k)))) {
+                        node = e;
+                        break;
+                    }
+                    p = e;
+                } while ((e = e.next) != null);
+            }
+        }
+        if (node != null && (!matchValue || (v = node.value) == value || (value != null && value.equals(v)))) {
+            if (node instanceof TreeNode)
+                ((TreeNode<K,V>)node).removeTreeNode(this, tab, movable);
+            else if (node == p)
+                tab[index] = node.next;
+            else
+                p.next = node.next;
+            ++modCount;
+            --size;
+            afterNodeRemoval(node);
+            return node;
+        }
+    }
+    return null;
+}
+```
+
+{% note success %}
+### 清空Map
+{% endnote %}
+遍历数组进行置空
+```java
+public void clear() {
+    Node<K,V>[] tab;
+    modCount++;
+    if ((tab = table) != null && size > 0) {
+        size = 0;
+        for (int i = 0; i < tab.length; ++i)
+            tab[i] = null;
+    }
 }
 ```
