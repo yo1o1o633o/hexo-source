@@ -12,7 +12,7 @@ tags:
 ### 基本信息
 {% endnote %}
 - 使用数组+链表+红黑树实现, 当链表长度超过8且数组长度超过64时, 会将链表转成红黑树
-- Key和Value可以为null
+- Key和Value可以为null, Key为null则永远保存在数组索引0的位置
 - 扩容时链表采用高位参与运算, 且尾插形式迁移
 
 {% note success %}
@@ -65,7 +65,7 @@ public HashMap(int initialCapacity) {
 所有参数使用默认值
 ```java
 public HashMap() {
-    this.loadFactor = DEFAULT_LOAD_FACTOR; // all other fields defaulted
+    this.loadFactor = DEFAULT_LOAD_FACTOR;
 }
 ```
 用一个Map初始化此HashMap
@@ -122,7 +122,7 @@ final void putMapEntries(Map<? extends K, ? extends V> m, boolean evict) {
     int s = m.size();
     if (s > 0) {
         // 数组没有初始化
-        if (table == null) { // pre-size
+        if (table == null) {
             float ft = ((float)s / loadFactor) + 1.0F;
             int t = ((ft < (float)MAXIMUM_CAPACITY) ? (int)ft : MAXIMUM_CAPACITY);
             if (t > threshold)
