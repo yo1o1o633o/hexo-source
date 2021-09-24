@@ -20,7 +20,7 @@ tags:
 4. 获取元素时不需要加锁
 
 {% note success %}
-### 常量和变量
+### 关键参数
 {% endnote %}
 
 ```java
