@@ -11,7 +11,7 @@ tags:
 {% note success %}
 ### 基本信息
 {% endnote %}
-- 线程安全, 通过在底层为数组创建新的副本实现
+- 线程安全, 采用写时复制策略, 在对数组进行写操作时为数组创建新的副本, 消耗性能, 读取元素不加锁, 所以此容器适用于读多写少情况
 - 并发的添加, 设置操作通过使用ReentrantLock锁来保证线程安全
 - 没有预扩容操作, 每次添加都进行容量调整
 
@@ -147,6 +147,45 @@ public void add(int index, E element) {
         newElements[index] = element;
         // 将新数组赋值到原数组
         setArray(newElements);
+    } finally {
+        // 释放锁
+        lock.unlock();
+    }
+}
+```
+
+{% note success %}
+### 移除指定索引元素
+{% endnote %}
+并发的移除操作, 移除指定索引下标的元素, 将后续元素向左移动, 采用ReentrantLock锁来保证线程安全
+```java
+public E remove(int index) {
+    final ReentrantLock lock = this.lock;
+    // 加锁, 保证多个线程并发移除元素安全
+    lock.lock();
+    try {
+        // 获取原数组
+        Object[] elements = getArray();
+        int len = elements.length;
+        // 获取要移除的元素值
+        E oldValue = get(elements, index);
+        int numMoved = len - index - 1;
+        // 要移除的是最后一个元素
+        if (numMoved == 0)
+            setArray(Arrays.copyOf(elements, len - 1));
+        // 要移除的元素在数组中间
+        else {
+            // 定义一个原数组-1长度的数组
+            Object[] newElements = new Object[len - 1];
+            // 拷贝指定索引前元素
+            System.arraycopy(elements, 0, newElements, 0, index);
+            // 拷贝指定索引后元素
+            System.arraycopy(elements, index + 1, newElements, index, numMoved);
+            // 将新数组赋值到原数组
+            setArray(newElements);
+        }
+        // 返回移除的元素
+        return oldValue;
     } finally {
         // 释放锁
         lock.unlock();
