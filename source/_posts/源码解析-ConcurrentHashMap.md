@@ -1,5 +1,6 @@
 ---
 title: 源码解析-ConcurrentHashMap
+mathjax: true
 categories:
     - JAVA
 tags:
@@ -13,11 +14,15 @@ tags:
 - 利用CAS自旋锁+Synchronized保证并发安全的Map
 - 使用数组+链表+红黑树实现
 - key和value不能为null
+- 采用数组存储数据, 数组的每个元素是一个头节点对象, 也代表一个槽
+- 多个Hash相同的Key会放在同一个槽内(采用链表或者红黑树保存)
+- 在并发操作中只会对单个槽加锁
 
 1. 构造函数进行初始化数组容量, 会根据传入容量进行计算. 实际容量高于传入的容量
 2. 支持多线程同时扩容, 其他线程发现当前数组在扩容时会进行协助扩容
 3. 元素计数采用baseCount和数组形式以支持多线程并发更新计数
 4. 获取元素时不需要加锁
+
 
 {% note success %}
 ### 关键参数
@@ -102,7 +107,9 @@ private static final int tableSizeFor(int c) {
 public ConcurrentHashMap() {
 }
 ```
-传入初始容量构造方法, 根据传入的初始容量计算实际的初始容量, 并向sizeCtl参数赋值, 因为数组还未初始化, sizeCtl表示初始容量, tableSizeFor方法会返回一个2的幂次方数
+传入初始容量构造方法, 根据传入的初始容量计算实际的初始容量, 并向sizeCtl参数赋值
+因为数组还未初始化, sizeCtl表示初始容量, tableSizeFor方法会返回一个2的幂次方数
+
 示例: 
 initialCapacity + (initialCapacity >>> 1) + 1 = 16 + 16 / 2 + 1 = 25
 tableSizeFor(25) = 32
@@ -110,9 +117,7 @@ tableSizeFor(25) = 32
 public ConcurrentHashMap(int initialCapacity) {
     if (initialCapacity < 0)
         throw new IllegalArgumentException();
-    int cap = ((initialCapacity >= (MAXIMUM_CAPACITY >>> 1)) ?
-               MAXIMUM_CAPACITY :
-               tableSizeFor(initialCapacity + (initialCapacity >>> 1) + 1));
+    int cap = ((initialCapacity >= (MAXIMUM_CAPACITY >>> 1)) ? MAXIMUM_CAPACITY : tableSizeFor(initialCapacity + (initialCapacity >>> 1) + 1));
     this.sizeCtl = cap;
 }
 ```
@@ -178,6 +183,7 @@ public boolean isEmpty() {
 4. 如果hash为负表示正在扩容或者时红黑树结点, 调用结点find方法查找并返回
 5. 如果是链表, 则遍历链表找到对于的key值并返回Value
 6. 获取元素不需要加锁, tabAt采用Volatile方式读取内存的数据, 保证线程可见性, 如果是扩容则会使用find方法找到nextTable中的元素
+
 ```java
 public V get(Object key) {
     Node<K,V>[] tab; Node<K,V> e, p; int n, eh; K ek;
@@ -206,7 +212,7 @@ public V get(Object key) {
 ```
 
 {% note success %}
-### KEY是否存在
+### Key是否存在
 {% endnote %}
 调用get方法进行判断
 ```java
@@ -216,7 +222,7 @@ public boolean containsKey(Object key) {
 ```
 
 {% note success %}
-### VALUE是否存在
+### Value是否存在
 {% endnote %}
 找到一个Value, 最坏可能遍历整个Map, 性能很慢
 通过Traverser对象构建的迭代器进行查找
@@ -239,27 +245,26 @@ public boolean containsValue(Object value) {
 ```
 
 {% note success %}
-### 添加元素put()
+### 添加元素
 {% endnote %}
-内部调用putVal方法, key和value不能为null, 第三个参数表示发现key已存在是否覆盖, 传入false表示覆盖原value
+内部调用putVal方法, Key和Value不能为null, 第三个参数表示Key已存在是否覆盖原值, 传入false表示覆盖原Value
 ```java
 public V put(K key, V value) {
     return putVal(key, value, false);
 }
 ```
-
-{% note success %}
-### 添加元素putVal()
-{% endnote %}
 添加元素操作会有多线程并发处理情况, 采用CAS赋值和synchronized加锁的形式保证线程安全
 1. 如果table为null, 则表示还未初始化, 调用初始化方法
-2. 如果table已经初始化, 同时hash对应的数组元素为null, 则直接进行CAS赋值操作, 成功则跳出循环, 失败则重新进入循环
-3. 如果当前元素hash为-1, 则表示当前元素正在进行扩容移动, 进行协助扩容
-4. 以上都不成立, 表明当前数组元素有值, 对这个元素加synchronized后进行遍历处理
+2. 如果table已经初始化, 同时hash对应的槽为空, 表明当前添加元素为该槽的头结点, 直接创建头节点对象进行CAS赋值操作
+    成功则头结点设置成功, 跳出循环
+    失败则表示有多个线程在同时向该槽赋值, 而且当前线程没有抢过其他线程, 重新循环尝试
+3. 如果当前元素hash为MOVED(即-1), 则表示当前槽正在进行扩容移动, 则当前线程也去尝试协助扩容(helpTransfer方法)
+4. 以上都不成立, 表明当前槽元素有头结点, 对这个槽(头结点)加synchronized锁后进行遍历处理
     - 链表: 如果key在链表中存在, 则进行覆盖, 否则添加到链表尾部
     - 红黑树: 使用红黑树对象方法进行处理
-5. 检查是否符合链表转成红黑树条件, 符合进行转换
+5. 当链表长度为8, 符合链表转成红黑树条件, 尝试调用treeifyBin方法转换(不一定会转换, 方法内还要判断, 当数组长度大于等于64才转换)
 6. 元素计数操作同时进行扩容检查
+
 ```java
 final V putVal(K key, V value, boolean onlyIfAbsent) {
     // 校验下key和value不能为null
@@ -274,7 +279,8 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
         // 判断当前数组未初始化, 进行初始化
         if (tab == null || (n = tab.length) == 0)
             tab = initTable();
-        // 判断根据Hash值获取到的元素为null, 则以CAS形式将Key保存在这个索引位置上, CAS如果赋值失败了则表明有其他线程赋值成功了, 则进行下一次循环, 下一次循环时此if条件不成立进入其他逻辑处理
+        // 判断根据Hash值获取到的元素为null, 则以CAS形式将Key保存在这个索引位置上
+        // CAS如果赋值失败了则表明有其他线程赋值成功了, 则进行下一次循环, 下一次循环时此if条件不成立进入其他逻辑处理
         else if ((f = tabAt(tab, i = (n - 1) & hash)) == null) {
             if (casTabAt(tab, i, null, new Node<K,V>(hash, key, value, null)))
                 // CAS形式添加到数组成功, 直接返回
@@ -325,7 +331,8 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
                     }
                 }
             }
-            // 当使用链表保存数据时, 每次遍历都会自增binCount, 即记录链表中的元素个数, 如果有值同时这个值大于等于转换红黑树的条件时, 调用treeifyBin进行转换
+            // 当使用链表保存数据时, 每次遍历都会自增binCount, 即记录链表中的元素个数
+            // 如果有值同时这个值大于等于转换红黑树的条件时, 调用treeifyBin进行转换
             if (binCount != 0) {
                 // binCount >= 8
                 if (binCount >= TREEIFY_THRESHOLD)
@@ -344,31 +351,35 @@ final V putVal(K key, V value, boolean onlyIfAbsent) {
 
 {% note success %}
 ### 链表转红黑树
-treeifyBin(Node<K,V>[] tab, int index)
 {% endnote %}
 
-进入转换方法, 判断Table数组元素数量如果小于64则只进行扩容, 大于等于64个则转成红黑树
+判断Table数组容量, 小于64则只进行扩容, 大于等于64则转成红黑树
 ```java
 private final void treeifyBin(Node<K,V>[] tab, int index) {
     Node<K,V> b; int n, sc;
     if (tab != null) {
-        // 先判断数组Table的元素个数是否小于64个, 小于的话调用尝试扩容方法
+        // 先判断数组Table的容量, 如果是否小于64个则尝试扩容
         if ((n = tab.length) < MIN_TREEIFY_CAPACITY)
             tryPresize(n << 1);
-        // 大于等于64个元素进行转成红黑树操作
+        // 数组Table的容量大于等于64个元素进行转成红黑树操作
         else if ((b = tabAt(tab, index)) != null && b.hash >= 0) {
+            // 加锁
             synchronized (b) {
+                // 二次判断
                 if (tabAt(tab, index) == b) {
                     TreeNode<K,V> hd = null, tl = null;
+                    // 遍历链表, 讲Node节点的链表, 转成TreeNode节点的链表, hd执行链表头节点, tl指向链表尾节点
                     for (Node<K,V> e = b; e != null; e = e.next) {
-                        TreeNode<K,V> p =
-                            new TreeNode<K,V>(e.hash, e.key, e.val, null, null);
+                        // 创建一个树节点
+                        TreeNode<K,V> p = new TreeNode<K,V>(e.hash, e.key, e.val, null, null);
                         if ((p.prev = tl) == null)
                             hd = p;
                         else
                             tl.next = p;
                         tl = p;
                     }
+                    // 创建红黑树new TreeBin<K,V>(hd)
+                    // 将红黑树放到槽内setTabAt()
                     setTabAt(tab, index, new TreeBin<K,V>(hd));
                 }
             }
@@ -376,6 +387,8 @@ private final void treeifyBin(Node<K,V>[] tab, int index) {
     }
 }
 ```
+将Node节点链表转成TreeNode节点链表
+{% asset_img 5.png %}
 
 {% note success %}
 ### 批量添加元素
@@ -523,12 +536,12 @@ public void clear() {
 
 {% note success %}
 ### 初始化Table
-initTable()
 {% endnote %}
-数组未初始化, 则进行初始化操作, 初始化依赖sizeCtl参数
-sizeCtl如果小于0则表示已经有线程在初始化, 当前线程让出CPU, 否则采用CAS方式争夺初始化操作权, 多线程并发情况, 同时进行CAS竞争, 竞争成功的进行初始化操作, 竞争失败的让除CPU时间片等待初始化完成
+当多个线程同时进入初始化方法时, 只有1个线程可以以CAS形式竞争到处理权(得到锁), 其他线程让出CPU时间片并继续循环等待数组初始化完成后, 跳出循环
 竞争成功的线程将sizeCtl设置成-1, 表明数组正在进行初始化, 初始化完成后将sizeCtl设置为扩容阈值
-计算扩容阈值使用右移操作替代除法, 提高运算效率: sc = n - (n >>> 2), 
+
+计算扩容阈值使用右移操作替代除法, 提高运算效率: sc = n - (n >>> 2)
+
 示例: 
 n = 16
 sc = n - (n >>> 2) = 16 - 16 / 2 / 2 = 12, 即16 * 0.75 = 12
@@ -538,24 +551,26 @@ sc = n - (n >>> 2) = 16 - 16 / 2 / 2 = 12, 即16 * 0.75 = 12
 private final Node<K,V>[] initTable() {
     Node<K,V>[] tab; int sc;
     while ((tab = table) == null || tab.length == 0) {
-        // 小于0表示其他线程正在初始化Table, 当前线程调用yield方法让出CPU时间片
+        // 小于0表示其他线程正在初始化Table, 当前线程调用yield方法让出CPU时间片, 同时继续循环等待数组初始化完成才跳出循环
         if ((sc = sizeCtl) < 0)
             Thread.yield(); // lost initialization race; just spin
-        // 以原子性操作对sizeCtl赋值成-1, 表示正在扩容
+        // 以CAS操作对sizeCtl赋值成-1, 标记正在扩容, 赋值成功则获取到初始化操作权限
+        // sc = sizeCtl, 获得了sizeCtl的值, 比较SIZECTL和sc的值是否相等, 如果相同则赋值为-1. 
+        // 如果不相同, 则表示在sc = sizeCtl和U.compareAndSwapInt(this, SIZECTL, sc, -1)两行代码之间有其他线程操作了SIZECTL这个值
         else if (U.compareAndSwapInt(this, SIZECTL, sc, -1)) {
             try {
                 if ((tab = table) == null || tab.length == 0) {
-                    // 初始化容量
+                    // 计算初始化容量
                     int n = (sc > 0) ? sc : DEFAULT_CAPACITY;
                     @SuppressWarnings("unchecked")
-                    // 创建数组
+                    // 初始化数组
                     Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n];
                     table = tab = nt;
-                    // 计算扩容阈值
+                    // 计算下一次扩容阈值(当前容量的0.75倍)
                     sc = n - (n >>> 2);
                 }
             } finally {
-                // 初始化完成, sizeCtl保存扩容阈值
+                // 初始化完成, sizeCtl保存下一次扩容阈值
                 sizeCtl = sc;
             }
             break;
@@ -567,7 +582,6 @@ private final Node<K,V>[] initTable() {
 
 {% note success %}
 ### 添加计数和扩容检查
-addCount(long x, int check)
 {% endnote %}
 此方法执行两个操作
 - 处理元素数量计数, 增加或者减少
@@ -630,7 +644,6 @@ private final void addCount(long x, int check) {
 
 {% note success %}
 ### 添加计数
-fullAddCount(long x, boolean wasUncontended)
 {% endnote %}
 自旋处理
 1. CounterCell[]数组为初始化, 则执行初始化操作
@@ -991,6 +1004,7 @@ private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
 int runBit = fh & n;
 ```
 使用高位与操作
+
 11111111 11111111 11111111 0<font color=#FF0000>0</font>011010
 00000000 00000000 00000000 0<font color=#FF0000>1</font>000000
 结果为0
@@ -1004,6 +1018,7 @@ int runBit = fh & n;
 2. 找出与头结点高位不相同的连续链表尾部结点
 3. 遍历链表, 根据元素结点是高位0还是高位1采用头插法分别保存在两个链表中ln,hn
 4. 将两个链表分别保存到新数组的索引位置, 高位0保存在和原数组相同的索引位置, 高位1保存到原数组索引+原数组长度的索引位置
+
 {% asset_img concurrentHashMap2.png %}
 {% asset_img concurrentHashMap3.png %}
 
@@ -1013,6 +1028,7 @@ int runBit = fh & n;
 2. 根据高位0和高位1拆分成两个链表, 新链表采用尾插法
 3. 将两个新链表保存到新数组中, 插入位置的选择同上
 4. 如果拆分后的链表长度超过8个元素, 则转成红黑树
+
 {% asset_img concurrentHashMap4.png %}
 {% asset_img concurrentHashMap1.png %}
 
