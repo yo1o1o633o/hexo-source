@@ -1,6 +1,7 @@
 ---
 title: 源码解析-ArrayList
 date: 2021-09-25 18:25:17
+top: 1
 categories:
     - JAVA
 tags:
@@ -21,7 +22,7 @@ tags:
 构造一个具有指定容量的列表, 容量不能为负
 ```java
 public ArrayList(int initialCapacity) {
-    // 指定容量不能为负
+    // 指定容量不能为负, 为负时抛出异常.
     if (initialCapacity > 0) {
         this.elementData = new Object[initialCapacity];
     } else if (initialCapacity == 0) {
@@ -46,7 +47,7 @@ public ArrayList(Collection<? extends E> c) {
         if (elementData.getClass() != Object[].class)
             elementData = Arrays.copyOf(elementData, size, Object[].class);
     } else {
-        // replace with empty array.
+        // 初始化为空数组
         this.elementData = EMPTY_ELEMENTDATA;
     }
 }

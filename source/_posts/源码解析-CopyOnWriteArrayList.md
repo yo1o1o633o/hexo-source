@@ -1,6 +1,7 @@
 ---
 title: 源码解析-CopyOnWriteArrayList
 date: 2021-09-25 22:46:41
+top: 2
 categories:
     - JAVA
 tags:
@@ -11,9 +12,11 @@ tags:
 {% note success %}
 ### 基本信息
 {% endnote %}
-- 线程安全, 采用写时复制策略, 在对数组进行写操作时为数组创建新的副本, 消耗性能, 读取元素不加锁, 所以此容器适用于读多写少情况
-- 并发的添加, 设置操作通过使用ReentrantLock锁来保证线程安全
-- 没有预扩容操作, 每次添加都进行容量调整
+- 线程安全, 采用写时复制策略(读写分离), 在对数组进行写操作时为数组创建新的副本, 消耗性能, 读取元素不加锁, 所以此容器适用于读多写少情况
+- 并发写操作通过使用ReentrantLock锁来保证线程安全, 避免多线程操作拷贝出多份新数组
+- 资源占用高, 写操作需要进行数组拷贝, 有额外的内存资源占用
+- 无法保证数据实时一致性, 只能保证数据最终一致性
+- 没有初始化容量, 每新增一个元素就申请原数组+1长度的新数组进行拷贝
 
 {% note success %}
 ### 构造方法
@@ -50,7 +53,10 @@ public CopyOnWriteArrayList(E[] toCopyIn) {
 {% note success %}
 ### 设置指定索引元素
 {% endnote %}
-并发的设置操作, 对指定索引的位置赋值, 采用ReentrantLock锁来保证线程安全
+1. 加ReentrantLock锁, 保证只有一个线程操作该数组
+2. 拷贝一个新数组
+3. 在新数组上对指定索引进行赋值
+4. 将新数组的引入赋值给原数组
 ```java
 public E set(int index, E element) {
     final ReentrantLock lock = this.lock;
@@ -86,8 +92,11 @@ public E set(int index, E element) {
 {% note success %}
 ### 添加元素
 {% endnote %}
-添加一个元素到数组最后
-并发的添加操作, 采用ReentrantLock锁来保证线程安全
+在数组最后追加一个元素
+1. 加ReentrantLock锁, 保证只有一个线程操作该数组
+2. 拷贝一个新数组, 容量为原数组长度+1
+3. 将新元素放到新数组的最后一位
+4. 将新数组的引入赋值给原数组
 ```java
 public boolean add(E e) {
     final ReentrantLock lock = this.lock;
@@ -115,6 +124,12 @@ public boolean add(E e) {
 ### 添加指定索引元素
 {% endnote %}
 并发的添加操作, 在指定索引位置添加元素, 将当前在该位置的元素(如果有)和任何后续元素向右移动, 采用ReentrantLock锁来保证线程安全
+1. 加ReentrantLock锁, 保证只有一个线程操作该数组
+2. 计算要移动的元素数量
+3. 拷贝指定索引前元素
+4. 拷贝指定索引后元素
+5. 将指定元素放到新数组空出的位置上
+4. 将新数组的引入赋值给原数组
 ```java
 public void add(int index, E element) {
     final ReentrantLock lock = this.lock;
@@ -129,7 +144,7 @@ public void add(int index, E element) {
             throw new IndexOutOfBoundsException("Index: "+index+", Size: "+len);
         // 定义一个新的空数组
         Object[] newElements;
-        // 要移动的索引
+        // 要移动的元素数量
         int numMoved = len - index;
         // 插入的索引为数组末尾, 不需要移动, 直接拷贝数组
         if (numMoved == 0)
