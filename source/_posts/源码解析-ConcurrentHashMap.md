@@ -1,6 +1,7 @@
 ---
 title: 源码解析-ConcurrentHashMap
 mathjax: true
+top: 4
 categories:
     - JAVA
 tags:
@@ -33,7 +34,7 @@ tags:
 private static final int MAXIMUM_CAPACITY = 1 << 30;
 // 表的默认初始容量
 private static final int DEFAULT_CAPACITY = 16;
-// 链表转成红黑树的阈值, 将元素添加到至少具有这么多节点的链表时, 链表会转换为树. 该值必须大于2, 并且应至少为8
+// 链表转成红黑树的阈值, 将元素添加到至少具有这么多节点的链表时, 链表会转换为红黑树. 该值必须大于2, 并且应至少为8
 static final int TREEIFY_THRESHOLD = 8;
 // 红黑树收缩为链表的阈值
 static final int UNTREEIFY_THRESHOLD = 6;
@@ -52,7 +53,7 @@ private static final int RESIZE_STAMP_SHIFT = 32 - RESIZE_STAMP_BITS;
 transient volatile Node<K,V>[] table;
 // 用于扩容时迁移使用, 只会在扩容时非空
 private transient volatile Node<K,V>[] nextTable;
-// 基本计数保存遍历, 在没有线程争用时使用, 也会在表初始化竞争期间的后备使用, 采用CAS更新
+// 基本计数保存变量, 在没有线程争用时使用, 也会在表初始化竞争期间的后备使用, 采用CAS更新
 private transient volatile long baseCount;
 // 关键状态参数
 private transient volatile int sizeCtl;
@@ -60,7 +61,7 @@ private transient volatile int sizeCtl;
 private transient volatile int transferIndex;
 // 调整大小和/或创建 CounterCell 时使用的自旋锁(通过 CAS 锁定)
 private transient volatile int cellsBusy;
-// 计数器数据表, 当baseCount线程竞争时使用, 当非空时, 大小是 2 的幂。
+// 计数器数据表, 当baseCount线程竞争时使用, 当非空时, 大小是2的幂。
 private transient volatile CounterCell[] counterCells;
 ```
 
@@ -388,7 +389,7 @@ private final void treeifyBin(Node<K,V>[] tab, int index) {
 }
 ```
 将Node节点链表转成TreeNode节点链表
-{% asset_img 5.png %}
+{% asset_img treeifyBin.png %}
 
 {% note success %}
 ### 批量添加元素
