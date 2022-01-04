@@ -8,10 +8,27 @@ tags:
 - 源码
 ---
 
+<script type="text/javascript">
+    // 禁止右键菜单
+    // true是允许，false是禁止
+    document.oncontextmenu = function(){ return false; };
+    // 禁止文字选择
+    document.onselectstart = function(){ return false; };
+    // 禁止复制
+    document.oncopy = function(){ return false; };
+    // 禁止剪切
+    document.oncut = function(){ return false; };
+    // 禁止粘贴
+    document.onpaste = function(){ return false; };
+    // 禁止键盘事件
+    // document.onkeydown = function(){ return false; };
+</script>
+
 {% note success %}
 ### 基本信息
 {% endnote %}
-1. 文章是基于Redis6.0版本的
+
+文章是基于Redis6.0版本的
 
 
 {% note success %}
@@ -328,21 +345,29 @@ zskiplistNode *zslUpdateScore(zskiplist *zsl, double curscore, sds ele, double n
 ### 释放资源
 {% endnote %}
 ```C
+/*
+* 释放跳表节点资源
+*/
 void zslFreeNode(zskiplistNode *node) {
     sdsfree(node->ele);
     zfree(node);
 }
 
-/* Free a whole skiplist. */
+/*
+* 释放整个跳表资源
+*/
 void zslFree(zskiplist *zsl) {
+    // 保留第一层的第一个节点
     zskiplistNode *node = zsl->header->level[0].forward, *next;
-
+    // 释放头节点
     zfree(zsl->header);
+    // 从第一个元素节点向后遍历, 逐个节点释放资源
     while(node) {
         next = node->level[0].forward;
         zslFreeNode(node);
         node = next;
     }
+    // 释放整个跳表资源
     zfree(zsl);
 }
 ```
